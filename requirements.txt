@@ -1,0 +1,9 @@
+numpy
+scipy
+scikit-learn>=0.22.1
+umap-learn
+matplotlib
+psutil
+pandas
+pytest
+hdbscan
