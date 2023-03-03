@@ -5,6 +5,10 @@ A stability-based relative clustering validation method to determine the best nu
 1. [Project Overview](#Project_Overview)
 2. [Installation and Requirements](#Installation)
 3. [How to use NeuReval](#Use)
+  1. [Grid-search cross-validation for parameters' tuning] (#Grid-search)
+  2. [Run NeuReval with opitmized clustering/classifier/preprocessing algorithms (#NeuReval)
+  3. [Visualize results] (#Visualization)
+  4. [Compute internal measures] (#Internal measures)
 5. [Example](#Example)
 6. [Notes](#Notes)
 7. [References](#References)
@@ -22,3 +26,11 @@ The following changes were made to reval to be performed on neuroimaging data:
 1. Standardization and covariates adjustement within cross-validation
 2. Combine different kind of neuroimaging data and apply different set of covariates to each neuroimaging modality
 3. Implementation of data reduction techniques (e.g., PCA, UMAP) and optimization of their parameters within cross-validation
+
+## 2. Installation and Requirements <a name="Installation"></a>
+Work in progress
+
+## 3. How to use NeuReval <a name="Use"></a>
+
+
+
