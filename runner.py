@@ -3,7 +3,7 @@
 """
 Created on Fri Jul  8 12:03:07 2022
 
-@author: psicobiologia
+@author: fcolo
 """
 ### Example of NeurReval application with GaussianMixture as clustering algorithm, SVC as classifier, and UMAP for dimensionality reduction ###
 
