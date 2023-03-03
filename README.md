@@ -6,7 +6,7 @@ A stability-based relative clustering validation method to determine the best nu
 2. [Installation and Requirements](#Installation)
 3. [How to use NeuReval](#Use)
   1. [Grid-search cross-validation for parameters' tuning] (#Grid-search)
-  2. [Run NeuReval with opitmized clustering/classifier/preprocessing algorithms (#NeuReval)
+  2. [Run NeuReval with opitmized clustering/classifier/preprocessing algorithms] (#NeuReval)
   3. [Visualize results] (#Visualization)
   4. [Compute internal measures] (#Internal measures)
 5. [Example](#Example)
