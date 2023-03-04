@@ -44,7 +44,7 @@ for database with **input features (database.xlsx)**:
 
 Example of database structure for input features:
 
-| Subject ID  | Diagnosis | Feature_01 | Feature_02 |
+| Subject_ID  | Diagnosis | Feature_01 | Feature_02 |
 | ------------| ----------| -----------| -----------|
 | sub_0001    | 0         | 0.26649221 | 2.13888054 |
 | sub_0002    | 1         | 0.32667590 | 0.67116539 |
@@ -59,12 +59,12 @@ for database with **covariates (covariates.xlsx)**:
 
 Example of database structure for covariates:
 
-| Subject ID  | Diagnosis | Age | Sex | TIV     |
+| Subject_ID  | Diagnosis | Age | Sex | TIV     |
 | ------------| ----------| ----|-----| --------|
 | sub_0001    | 0         | 54  | 0   | 1213.76 |
 | sub_0002    | 1         | 37  | 1   | 1372.93 |
 | sub_0003    | 0         | 43  | 0   | 1285.88 |
 
-
+Examples of fake datasets are provided in the folder **NeuReval/data**
 
 
