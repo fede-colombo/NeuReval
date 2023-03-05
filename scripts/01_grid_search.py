@@ -11,16 +11,12 @@ Created on Sat Mar  4 11:31:09 2023
 # Make the required imports
 import pandas as pd
 import numpy as np
-from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
+from neureval.param_selection_confounds import ParamSelectionConfounds
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
-from sklearn.cluster import AgglomerativeClustering, KMeans, DBSCAN, SpectralClustering
-from neureval.param_selection_confounds import ParamSelectionConfounds
-from neureval.visualization import plot_metrics
-from sklearn.metrics import zero_one_loss, adjusted_mutual_info_score
+from sklearn.cluster import AgglomerativeClustering, KMeans, SpectralClustering
 from umap import UMAP
 from hdbscan import HDBSCAN
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.mixture import GaussianMixture
@@ -58,7 +54,8 @@ params = {'s': {'C': [0.01, 0.1, 1, 10, 100, 1000],
 # Specify clustering (c), classifier (s), and preprocessing (preproc) algorithms
 c = GaussianMixture(random_state=42)
 s = SVC(random_state=42)
-preproc = UMAP(random_state=42)
+# If you want to perform dimensionality reduction, uncomment the following line. Change the dimensionality reduction algorithm accordingly (e.g., UMAP, PCA)
+# preproc = UMAP(random_state=42)
  
 # Run ParamSelectionConfounds that implements grid search cross-validation to select the best combinations of parameters for fixed classifier/clustering/preprocessing algorithms.
 # Parameters to be specified:
