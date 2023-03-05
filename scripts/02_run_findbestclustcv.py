@@ -49,7 +49,7 @@ covariates = pd.read_excel(os.path.join(data_path, covariates_file), sheet_name=
 s = SVC(C=1, kernel='rbf', random_state=42)
 c = GaussianMixture(covariance_type='full', random_state=42)
 # Uncomment the following line if you also optimized preprocessing steps
-# best_preproc = UMAP(n_components=4, n_neighbors=30, min_dist=0.0, random_state=42)
+# preproc = UMAP(n_components=4, n_neighbors=30, min_dist=0.0, random_state=42)
 
 # Initialize FindBestClustCVConfounds class. It performs (repeated) k-folds cross-validation to select the best number of clusters.
 # Parameters to be specified:
