@@ -90,8 +90,6 @@ def select_best(data, covariates, c, int_measure, preprocessing=None, select='ma
             else:
                 c.n_components = ncl
             label = c.fit_predict(X_cor)
-            c.n_clusters = ncl
-            label = c.fit_predict(X_cor)
             scores.append(int_measure(X_cor, label))
             label_vect.append(label)
     else:
