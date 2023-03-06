@@ -13,7 +13,7 @@ A stability-based relative clustering validation method to determine the best nu
 5. [References](#References)
 
 ## 1. Project overview <a name="Project_Overview"></a>
-*NeuReval* implements a stability-based relative clustering approach within a cross-validation framework to identify the clustering solution that best replicates on unseen data. Compared to commonly used internal measures that rely on the inherent characteristics of the data, this approach has the advantage to identify clusters that are robust and reproducible in other samples of the same population. NeuReval is based on *reval* Python package (https://github.com/IIT-LAND/reval_clustering) and extends its application to neuroimaging data. For more details about the theoretical background of *reval*, please see Landi et al. (2021).
+*NeuReval* implements a stability-based relative clustering approach within a cross-validation framework to identify the clustering solution that best replicates on unseen data. Compared to commonly used internal measures that rely on the inherent characteristics of the data, this approach has the advantage to identify clusters that are robust and reproducible in other samples of the same population. *NeuReval* is based on *reval* Python package (https://github.com/IIT-LAND/reval_clustering) and extends its application to neuroimaging data. For more details about the theoretical background of *reval*, please see Landi et al. (2021).
 
 This package allows to:
 1. Select any classification algorithm from *sklearn* library;
@@ -35,7 +35,7 @@ Work in progress
 
 for database with **input features (database.xlsx)**:
 - First column: subject ID
-- Second column: diagnosis (e.g., patients=1, healthy controls=0). In case NeuReval is run on a single diagnostic group, provide a costant value for all subjects.
+- Second column: diagnosis (e.g., patients=1, healthy controls=0). In case *NeuReval* is run on a single diagnostic group, provide a costant value for all subjects.
 - From the third column: features
 
 **Notes**: in case you want to combine with difffusion tensor imaging (DTI) extracted tract-based features, please add them after all the other neuroimaging features. The first DTI feature should be "ACR".
@@ -50,7 +50,7 @@ Example of database structure for input features:
 
 for database with **covariates (covariates.xlsx)**:
 - First column: subject ID
-- Second column: diagnosis (e.g., patients=1, healhty controls=0). In case NeuReval is run on a single diagnostic group, provide a costant value for all subjects.
+- Second column: diagnosis (e.g., patients=1, healhty controls=0). In case *NeuReval* is run on a single diagnostic group, provide a costant value for all subjects.
 - From the third column: covariates
 
 **Notes**: if you want to correct neuroimaging features also for total intracranial volume (TIV), please add it as the last column of the database.
@@ -97,7 +97,7 @@ Parameters to be specified:
 - **c**: clustering object (with optimized parameters)
 - **preprocessing**: data reduction algorithm object (with optimized parameters), default None
 - **nrand**: number of random labelling iterations, default 10
-- **nfold**: number of cross-validation folds, deafult 2
+- **nfold**: number of cross-validation folds, default 2
 - **n_jobs**: number of jobs to run in parallel, default (number of cpus - 1)
 - **clust_range**: list with number of clusters, default None
 
