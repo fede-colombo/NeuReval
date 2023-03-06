@@ -86,7 +86,7 @@ Parameters to be specified:
 Once the ```ParamSelectionConfounds``` class is initialized, the ```fit(data_tr, cov_tr, nclass=None)``` class method can be used to run grid-search cross-validation.
 It returns the optimal number of clusters (i.e., minimum normalized stability), the corresponding normalized stability, and the selected classifier/clustering/preprocessing parameters.
 
-## iii. Run NeuReval with opitmized clustering/classifier/preprocessing algorithms <a name="NeuReval"></a>
+### iii. Run NeuReval with opitmized clustering/classifier/preprocessing algorithms <a name="NeuReval"></a>
 After the selection of the best clustering/classifier/preprocessing parameters through grid-search cross-vallidation, we can initalize the ```FindBestClustCVConfounds``` class to assess the normalized stability associated to the best clustering solution and the corresponding clusters' labels
 
 ```python
@@ -106,7 +106,7 @@ Once the class has been initialized, the ```best_nclust_confounds(data, covariat
 - **bestncl**: best number of clusters
 - **tr_lab**: clusters' labels
 
-## iv. Compute internal measures <a name="Internal_measures"></a>
+### iv. Compute internal measures <a name="Internal_measures"></a>
 Together with normalized stability, *NeuReval* also allows to compute internal measures for comparisons between the stability-based relative validation and internal validation approaches. This can be done with the ```neureval.internal_baselines_confounds``` method and the function ```select_best``` to select the best number of clusters that maximize/minimize the selected internal measure:
 
 ```python
@@ -125,12 +125,12 @@ neureval.internal_baselines_confounds.select_best(data, covariates, c, int_measu
 
 **Notes**: in case Gaussian Mixture Model was implemented as clustering algorithm, the ```select_best_bic_aic``` function can be used to compute Akaike and Bayesian Information Criterion (AIC, BIC) and used them for model's selection.
 
-# 3. Example <a name="Example"></a>
+## 4. Example <a name="Example"></a>
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
 
 - **01_grid_search**: code to perform grid-search cross-validation for clustering/classifier/preprocessing parameters tuning
 - **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms
 - **03_visualization**: code to create a plot for clusters' representation
 
-# 5. References <a name="References"></a>
+## 5. References <a name="References"></a>
 Landi, I., Mandelli, V., & Lombardo, M. V. (2021). reval: A Python package to determine best clustering solutions with stability-based relative clustering validation. _Patterns_, 2(4), 100228.
