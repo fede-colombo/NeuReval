@@ -77,6 +77,7 @@ Parameters to be specified:
 - **cv**: cross-validation folds
 - **s**: classifier object
 - **c**: clustering object
+- **preprocessing**: data reduction algorithm object
 - **nrand**: number of random labelling iterations, default 10
 - **n_jobs**: number of jobs to run in parallel, default (number of cpus - 1)
 - **iter_cv**: number of repeated cross-validation, default 1
