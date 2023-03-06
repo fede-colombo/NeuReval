@@ -129,7 +129,7 @@ neureval.internal_baselines_confounds.select_best(data, covariates, c, int_measu
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
 
 - **01_grid_search**: code to perform grid-search cross-validation for clustering/classifier/preprocessing parameters tuning
-- **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms
+- **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms. This script also provides codes to compute different kind of internal measures
 - **03_visualization**: code to create a plot for clusters' representation
 
 ## 5. References <a name="References"></a>
