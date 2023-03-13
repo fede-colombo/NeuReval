@@ -10,7 +10,8 @@ A stability-based relative clustering validation method to determine the best nu
     3. [Run NeuReval with opitmized clustering/classifier/preprocessing algorithms](#NeuReval)
     4. [Compute internal measures](#Internal_measures)
 4. [Example](#Example)
-5. [References](#References)
+5. [Notes](#Notes)
+6. [References](#References)
 
 ## 1. Project overview <a name="Project_Overview"></a>
 *NeuReval* implements a stability-based relative clustering approach within a cross-validation framework to identify the clustering solution that best replicates on unseen data. Compared to commonly used internal measures that rely on the inherent characteristics of the data, this approach has the advantage to identify clusters that are robust and reproducible in other samples of the same population. *NeuReval* is based on *reval* Python package (https://github.com/IIT-LAND/reval_clustering) and extends its application to neuroimaging data. For more details about the theoretical background of *reval*, please see Landi et al. (2021).
@@ -27,7 +28,12 @@ The following changes were made to *reval* to be performed on neuroimaging data:
 3. Implementation of data reduction techniques (e.g., PCA, UMAP) and optimization of their parameters within cross-validation.
 
 ## 2. Installation and Requirements <a name="Installation"></a>
-Work in progress
+*NeuReval* can be installed with pip:
+
+```python
+pip install neureval
+```
+Dependencies useful to install *NeuReval* can be found in requirements.txt
 
 ## 3. How to use NeuReval <a name="Use"></a>
 ### i. Input structure <a name="Input"></a>
@@ -132,5 +138,8 @@ An example of how to perform *NeuReval* can be found in the folder **NeuReval/sc
 - **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms. This script also provides codes to compute different kind of internal measures
 - **03_visualization**: code to create a plot for clusters' representation
 
-## 5. References <a name="References"></a>
+## 5. Notes <a name="Notes"></a>
+*NeuReval* was developed in Python 3.8.10 and tested on ubuntu 20.04. In case of any issues in running *NeuReval* on other operating systems (i.e., Windows), you can send an email at the following address: f.colombo8@studenti.unisr.it 
+
+## 6. References <a name="References"></a>
 Landi, I., Mandelli, V., & Lombardo, M. V. (2021). reval: A Python package to determine best clustering solutions with stability-based relative clustering validation. _Patterns_, 2(4), 100228.
