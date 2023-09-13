@@ -81,11 +81,39 @@ print(f"Result accuracy (on test set): "
 # To save the plot, specify the file name for saving figure in png format.
 plot = plot_metrics(metrics, color=('black', 'black'), save_fig='plot_model_name.png')
 
-# Save database with cluster labels for post-hoc analyses
-labels = pd.DataFrame(tr_lab, columns=['Clustering labels'])
-data_all = pd.concat([data, labels], axis=1)
-data_all.to_csv('Labels_model_name.csv', index=True)
+# Save dataset with clustering labels for post-hoc analyses
+labels_tr = pd.DataFrame(tr_lab, columns=['Clustering labels'])
+data_all_tr = pd.concat([data, labels_tr], axis=1)
+# Change the .csv file name according to your model
+data_all_tr.to_csv('Labels_model_name_training.csv', index=True)
 
+### EXTERNAL VALIDATION
+
+# Import data and covariates files for the test set
+database_ts = 'database.xlsx'
+covariates_file_ts = 'covariates.xlsx'
+# If there are multiple sheets, specify the name of the current sheet 
+data_ts = pd.read_excel(os.path.join(data_path,database_ts), sheet_name='sheet_name')
+covariates_ts = pd.read_excel(os.path.join(data_path, covariates_file_ts), sheet_name='sheet_name')
+# Specify diagnosis column
+diagnosis = data_ts.iloc[:,1]
+
+# Validate the identified clusters
+# Parameters to be specified:
+# data_tr: dataset on which neureval was trained
+# diagnosis: diagnosis column
+# data_ts: test dataset
+# covariates_tr: covariates for the training set
+# covariates_ts: covariates for the test dataset
+# nclust: specify the best number of clusters idenfied in the training dataset (i.e., bestncl)
+out = findbestclust.evaluate_confounds(data_tr, diagnosis, data_ts, covariates_tr, covariates_ts, nclust=bestncl)
+print(f"Training ACC: {out.train_acc}, Test ACC: {out.test_acc}")
+
+# Save database with cluster labels obtained from the test set for post-hoc analyses
+labels_ts = pd.DataFrame(out.test_cllab, columns=['Clustering labels'])
+data_all_ts = pd.concat([data_ts, labels_ts], axis=1)
+# Change the .csv file name according to your model
+data_all_ts.to_csv('Labels_model_name_testing.csv', index=True)
 
 
 ### COMPUTE INTERNAL MEASURES FOR COMPARISON
