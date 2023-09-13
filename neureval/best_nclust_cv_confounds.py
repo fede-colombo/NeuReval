@@ -212,6 +212,12 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         :return: labels and accuracy for both training and test sets.
         :rtype: namedtuple, (train_cllab: array, train_acc:float, test_cllab:array, test_acc:float)
         """
+        data_tr_array = np.array(data_tr.iloc[:,2:])
+        data_ts_array = np.array(data_ts.iloc[:,2:])
+        Y_array = np.array(diagnosis_tr)
+        cov_tr_array = np.array(cov_tr.iloc[:,2:])
+        cov_ts_array = np.array(cov_ts.iloc[:,2:])
+      
         if combined_data is True:
             num_col_DTI = len(data_tr.loc[:,:"ACR"].T)
         else:
@@ -225,7 +231,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
                 X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
                 tr_misc, modelfit, labels_tr = super().train(X_train_cor)
             elif 'n_components' in self.clust_method.get_params().keys():
-                self.clust_method.n_clusters = nclust
+                self.clust_method.n_components = nclust
                 X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
                 tr_misc, modelfit, labels_tr = super().train(X_train_cor)
             else:
