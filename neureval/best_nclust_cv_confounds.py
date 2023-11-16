@@ -212,11 +212,11 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         :return: labels and accuracy for both training and test sets.
         :rtype: namedtuple, (train_cllab: array, train_acc:float, test_cllab:array, test_acc:float)
         """
-        data_tr_array = np.array(data_tr.iloc[:,2:])
-        data_ts_array = np.array(data_ts.iloc[:,2:])
-        Y_array = np.array(diagnosis_tr)
-        cov_tr_array = np.array(cov_tr.iloc[:,2:])
-        cov_ts_array = np.array(cov_ts.iloc[:,2:])
+        data_tr = np.array(data_tr.iloc[:,2:])
+        data_ts = np.array(data_ts.iloc[:,2:])
+        diagnosis_tr = np.array(diagnosis_tr)
+        cov_tr = np.array(cov_tr.iloc[:,2:])
+        cov_ts = np.array(cov_ts.iloc[:,2:])
       
         if combined_data is True:
             num_col_DTI = len(data_tr.loc[:,:"ACR"].T)
