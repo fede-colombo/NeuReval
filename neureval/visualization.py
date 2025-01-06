@@ -1,3 +1,9 @@
+"""
+@author: Federica Colombo
+         Psychiatry and Clinical Psychobiology Unit, Division of Neuroscience, 
+         IRCCS San Raffaele Scientific Institute, Milan, Italy
+"""
+
 from matplotlib import pyplot as plt
 
 
