@@ -211,8 +211,8 @@ pkl.dump(bic_results, open('./bic_results_model_name.pkl', 'wb'))
 # is required for the covariates sets
 
 # Import data and covariates files for the complete data and covariates files (training + hold-out sets in the same file)
-data_all_file = 'database_name.xlsx'
-cov_all_file = 'covariates_name.xlsx'
+data_all_file = 'database_all_name.xlsx'
+cov_all_file = 'covariates_all_name.xlsx'
 # If there are multiple sheets, specify the name of the current sheet 
 data_all = pd.read_excel(os.path.join(data_path,data_all_file), sheet='sheet_name')
 cov_all = pd.read_excel(os.path.join(data_path, cov_all_file), sheet='sheet_name')
