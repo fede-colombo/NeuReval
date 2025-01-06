@@ -28,7 +28,7 @@ The following changes were made to *reval* to be performed on neuroimaging data:
 2. Combine different kind of neuroimaging data and apply different set of covariates to each neuroimaging modality;
 3. Implementation of data reduction techniques (e.g., PCA, UMAP) and optimization of their parameters within cross-validation.
 
-****UPDATES NEUREVAL 1.1.0****
+**UPDATES NEUREVAL 1.1.0**
 While the original version of *NeuReval* was limited to perform different confounds removal only for 2 different types of modalities (e.g., remove the effect of TIV only for grey matter features and not for the DTI ones), the updated version offers more flexibility in the definition and number of modalities and covariates.
 
 ## 2. Installation and Requirements <a name="Installation"></a>
