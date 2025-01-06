@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 """
-Created on Sat Nov 12 12:09:17 2022
-
-@author: fcolo
+@author: Federica Colombo
+         Psychiatry and Clinical Psychobiology Unit, Division of Neuroscience, 
+         IRCCS San Raffaele Scientific Institute, Milan, Italy
 """
 
 from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
@@ -55,11 +54,11 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         ms_val = misclassification validation.
     """
 
-    def __init__(self, s, c, preprocessing, nrand, nfold=2, n_jobs=1, nclust_range=None):
+    def __init__(self, c, s, preprocessing, nrand, nfold=2, n_jobs=1, nclust_range=None):
         """
         Construct method.
         """
-        super().__init__(s, c, preprocessing, nrand)
+        super().__init__(c, s, preprocessing, nrand)
         self.nfold = nfold
         if abs(n_jobs) > mp.cpu_count():
             self.n_jobs = mp.cpu_count()
@@ -67,7 +66,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             self.n_jobs = abs(n_jobs)
         self.nclust_range = nclust_range
 
-    def best_nclust_confounds(self, data, covariates, iter_cv=1, strat_vect=None, combined_data=False):
+    def best_nclust_confounds(self, data, modalities, covariates, iter_cv=1, strat_vect=None):
         """
         This method takes as input the training dataset and the
         stratification vector (if available) and performs a
@@ -76,43 +75,35 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
 
         :param data: training dataset.
         :type data: ndarray, (n_samples, n_features)
-        :param covariates: covariates dataset.
-        :type covatìriates: ndarray, (n_samples, n_covariates)
+        :param modalities: dictionary specifying the datasets for each type of input features
+        :type modalities: dictionary
+        :param covariates: dictionary specifying the covariates for each type of input features
+        :type covatìriates: dictionary
         :param iter_cv: number of iteration for repeated CV, default 1.
         :type iter_cv: integer
         :param strat_vect: vector for stratification, defaults to None.
         :type strat_vect: ndarray, (n_samples,)
-        :param combined_data: if True, only grey matter features will be corrected for TIV. 
-            Otherwise, both grey matter and white matter features will be adjusted for the same set of covariates.
-        :type: boolean value
         :return: CV metrics for training and validation sets, best number of clusters,
             misclassification errors at each CV iteration.
         :rtype: dictionary, int, (list) if n_clusters parameter is not available
         """
-        data_array = np.array(data.iloc[:,2:])
-        Y_array = np.array(data.iloc[:,1])
-        cov_array = np.array(covariates.iloc[:,2:])
         
-        if combined_data is True:
-            num_col_DTI = len(data.loc[:,:"ACR"].T)
-        else:
-            num_col_DTI = None
-        
-        reval = RelativeValidationConfounds(self.class_method, self.clust_method, self.preproc_method, self.nrand)
+        reval = RelativeValidationConfounds(self.clust_method, self.class_method, self.preproc_method, self.nrand)
 
         if strat_vect is not None:
             kfold = RepeatedStratifiedKFold(n_splits=self.nfold, n_repeats=iter_cv, random_state=42)
         else:
             kfold = RepeatedKFold(n_splits=self.nfold, n_repeats=iter_cv, random_state=42)
-        fold_gen = kfold.split(data_array, strat_vect)
+        fold_gen = kfold.split(data, strat_vect)
         if self.nclust_range is not None and 'n_clusters' in self.clust_method.get_params().keys():
-            params = list(itertools.product([(data_array, reval, num_col_DTI)],[(Y_array, cov_array)],
+            params = list(itertools.product([(modalities, reval, covariates)],
                                             fold_gen, self.nclust_range))
         elif self.nclust_range is not None and 'n_components' in self.clust_method.get_params().keys():
-            params = list(itertools.product([(data_array, reval, num_col_DTI)], [(Y_array,cov_array)],
+            params = list(itertools.product([(modalities, reval, covariates)],
                                             fold_gen, self.nclust_range))
         else:
-            params = list(itertools.product([(data_array, reval, num_col_DTI)], [(Y_array, cov_array)], fold_gen))
+            params = list(itertools.product([(modalities, reval, covariates)],fold_gen))
+        
         if self.n_jobs > 1:
             p = mp.Pool(processes=self.n_jobs)
             miscl = list(zip(*p.starmap(self._fit_confounds, params)))
@@ -122,15 +113,13 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         else:
             miscl = []
             for p in params:
-                if len(p) > 3:
+                if len(p) > 2:
                     miscl.append(self._fit_confounds(data_obj=p[0],
-                                                     cov_obj=p[1],
-                                                     idxs=p[2],
-                                                     ncl=p[3]))
+                                                     idxs=p[1],
+                                                     ncl=p[2]))
                 else:
                     miscl.append(self._fit_confounds(data_obj=p[0],
-                                                     cov_obj=p[1],
-                                                     idxs=p[2]))
+                                                     idxs=p[1]))
             out = miscl
 
         # return dataframe attribute (cv_results_) with cv scores
@@ -150,6 +139,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
                          f"{self.class_method}.")
             return None
 
+        
         metrics = {'train': {}, 'val': {}}
         for ncl in cv_results_.ncl.unique():
             norm_stab_tr = cv_results_.loc[cv_results_.ncl == ncl]['ms_tr']
@@ -165,7 +155,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             bestncl = self.nclust_range[np.flatnonzero(val_score == bestscore)[-1]]
             # To comment
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
-            idx_vect = np.concatenate((params[best_idx][2][-2], params[best_idx][2][-1]))
+            idx_vect = np.concatenate((params[best_idx][1][-2], params[best_idx][1][-1]))
             label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
@@ -173,71 +163,62 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             bestncl = self.nclust_range[np.flatnonzero(val_score == bestscore)[-1]]
             # To comment
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
-            idx_vect = np.concatenate((params[best_idx][2][-2], params[best_idx][2][-1]))
+            idx_vect = np.concatenate((params[best_idx][1][-2], params[best_idx][1][-1]))
             label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
         else:
             bestncl = list(metrics['val'].keys())[np.flatnonzero(val_score == bestscore)[-1]]
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
-            idx_vect = np.concatenate((params[best_idx][2][-2], params[best_idx][2][-1]))
+            idx_vect = np.concatenate((params[best_idx][1][-2], params[best_idx][1][-1]))
             label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
-        
-    def evaluate_confounds(self, data_tr, diagnosis_tr, data_ts, cov_tr, cov_ts, nclust=None, tr_lab=None, combined_data=False):
+    
+    def evaluate_confounds(self, data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None):
         """
         Method that applies the selected clustering algorithm with the best number of clusters
         to the test set. It returns clustering labels.
     
-        :param data_tr: training dataset.
-        :type data_tr: ndarray, (n_samples, n_features)
-        :param diagnosis_tr: diagnosis labels.
-        :type diagnosis_tr: vector
-        :param data_ts: test dataset.
-        :type data_ts: ndarray, (n_samples, n_features)
-        :param cov_tr: covariates for training set.
-        :type cov_tr: ndarray, (n_samples, n_covariates)
-        :param cov_ts: covariates for test set.
-        :type cov_ts: ndarray, (n_samples, n_covariates)
+        :param data: dataset.
+        :type data: ndarray, (n_samples, n_features)
+        :param modalities: dictionary specifying the datasets for each type of input feature
+        :type modalities: dictionary
+        :param covariates: dictionary specifying the covariates for each type of input feature
+        :type covariates: dictionary
+        :param tr_idx: index specifying the training dataset
+        :type tr_idx: array-like
+        :param val_idx: index specifying the validation dataset
+        :type val_idx: array-like
         :param nclust: best number of clusters, default None.
         :type nclust: int
         :param tr_lab: clustering labels for the training set. If not None
             the clustering algorithm is not performed and the classifier is fitted.
             Available for clustering methods without `n_clusters` parameter. Default None.
         :type tr_lab: array-like
-        :param combined_data: if True, only grey matter features will be corrected for TIV. 
-            Otherwise, both grey matter and white matter features will be adjusted for the same set of covariates.
-        :type: boolean value
         :return: labels and accuracy for both training and test sets.
         :rtype: namedtuple, (train_cllab: array, train_acc:float, test_cllab:array, test_acc:float)
         """
-        if combined_data is True:
-            num_col_DTI = len(data_tr.loc[:,:"ACR"].T)
-        else:
-            num_col_DTI = None
-        
-        data_tr = np.array(data_tr.iloc[:,2:])
-        data_ts = np.array(data_ts.iloc[:,2:])
-        diagnosis_tr = np.array(diagnosis_tr)
-        cov_tr = np.array(cov_tr.iloc[:,2:])
-        cov_ts = np.array(cov_ts.iloc[:,2:])
       
         if isinstance(tr_lab, list):
             tr_lab = np.array(tr_lab)
         try:
             if 'n_clusters' in self.clust_method.get_params().keys():
                 self.clust_method.n_clusters = nclust
-                X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
-                tr_misc, modelfit, labels_tr = super().train(X_train_cor)
+                train_cor_dic, test_cor_dic = super().GLMcorrection_confounds(modalities,covariates, tr_idx, val_idx)
+                tr_misc, modelfit, labels_tr, X_train_cor = super().train(train_cor_dic, tr_lab)
             elif 'n_components' in self.clust_method.get_params().keys():
                 self.clust_method.n_components = nclust
-                X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
-                tr_misc, modelfit, labels_tr = super().train(X_train_cor)
+                train_cor_dic, test_cor_dic = super().GLMcorrection_confounds(modalities,covariates, tr_idx, val_idx)
+                tr_misc, modelfit, labels_tr, X_train_cor = super().train(train_cor_dic, tr_lab)
             else:
-                X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
-                tr_misc, modelfit, labels_tr = super().train(X_train_cor, tr_lab)
-            ts_misc, labels_ts = super().test(X_test_cor, modelfit)
+                train_cor_dic, test_cor_dic = super().GLMcorrection_confounds(modalities, covariates, tr_idx, val_idx)
+                tr_misc, modelfit, labels_tr, X_train_cor = super().train(train_cor_dic, tr_lab)
+            
+            if self.preproc_method is not None:
+                ts_misc, labels_ts, X_test_cor = super().test(test_cor_dic, modelfit, fit_preproc=self.preproc_method)
+            else:
+                ts_misc, labels_ts, X_test_cor = super().test(test_cor_dic, modelfit)
         except TypeError:
             logging.info(f"Not possible to perform evaluation on the test set. "
                          f"No clusters were identified with "
@@ -246,12 +227,13 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
 
         Eval = namedtuple('Eval',
                       ['train_cllab', 'train_acc', 'test_cllab', 'test_acc'])
-        out = Eval(labels_tr, 1 - tr_misc, labels_ts, 1 - ts_misc)
+        out = Eval(labels_tr, 1 - tr_misc,  labels_ts, 1 - ts_misc)
         return out
 
 
+
     @staticmethod
-    def _fit_confounds(data_obj, cov_obj, idxs, ncl=None):
+    def _fit_confounds(data_obj, idxs, ncl=None):
         """
         Function that calls training, test, covariates, and random labeling.
     
@@ -267,35 +249,26 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         :rtype: tuple (int, float, float)
         """
     
-        data_array, reval, num_col_DTI = data_obj
-        Y_array, cov_array = cov_obj
+        modalities, reval, covariates = data_obj
         tr_idx, val_idx = idxs
-        tr_set, val_set = data_array[tr_idx], data_array[val_idx]
-        tr_cov, val_cov = cov_array[tr_idx], cov_array[val_idx]
-        tr_diagnosis = Y_array[tr_idx]
         if 'n_clusters' in reval.clust_method.get_params().keys():
-            reval.clust_method.n_clusters = ncl
+           reval.clust_method.n_clusters = ncl
         elif 'n_components' in reval.clust_method.get_params().keys():
-            reval.clust_method.n_components = ncl
-    
+           reval.clust_method.n_components = ncl
+   
+        
         # Case in which the number of clusters identified is not sufficient or points are not classified
         # (it happens particularly for SpectralClustering and HDBSCAN)
         try:
-            if reval.__dict__.get('preproc_method') is not None:
-                X_train_cor, X_test_cor = reval.GLMcorrection(tr_set, tr_diagnosis, tr_cov, val_set, val_cov, num_col_DTI)
-                miscl_tr, modelfit, tr_labels, fitpreproc_tr = reval.train(X_train_cor)
-                miscl_val, val_labels = reval.test(X_test_cor, modelfit, fitpreproc_tr)
-                rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor,
-                                                              tr_labels,
-                                                              val_labels)
+            train_cor_dic, test_cor_dic = reval.GLMcorrection_confounds(modalities, covariates, tr_idx, val_idx)
+            miscl_tr, modelfit, tr_labels, X_train_cor = reval.train(train_cor_dic)
+            if reval.preproc_method is not None:
+                miscl_val, val_labels, X_test_cor = reval.test(test_cor_dic, modelfit, fit_preproc=reval.preproc_method)
+                rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
             else:
-                X_train_cor, X_test_cor = reval.GLMcorrection(tr_set, tr_diagnosis, tr_cov, val_set, val_cov, num_col_DTI)
-                miscl_tr, modelfit, tr_labels = reval.train(X_train_cor)
-                miscl_val, val_labels = reval.test(X_test_cor, modelfit)
-                rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor,
-                                                              tr_labels,
-                                                              val_labels)
-            
+                miscl_val, val_labels, X_test_cor = reval.test(test_cor_dic, modelfit)
+                rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
+               
             # If random labeling gives perfect prediction, substitute
             # misclassification for validation loop with 1.0
             if rndmisc_mean_val > 0.0:
@@ -320,3 +293,63 @@ def _confint(vect):
     # interval = 1.96 * math.sqrt((mean * (1 - mean)) / len(vect))
     interval = stats.t.ppf(1 - (0.05 / 2), len(vect) - 1) * (np.std(vect) / math.sqrt(len(vect)))
     return mean, interval
+
+
+
+    # def evaluate_mcca(self, mod_tr, mod_ts, cov_tr, cov_ts, nclust=None, tr_lab=None):
+    #     """
+    #     Method that applies the selected clustering algorithm with the best number of clusters
+    #     to the test set. It returns clustering labels.
+    
+    #     :param data_tr: training dataset.
+    #     :type data_tr: ndarray, (n_samples, n_features)
+    #     :param diagnosis_tr: diagnosis labels.
+    #     :type diagnosis_tr: vector
+    #     :param data_ts: test dataset.
+    #     :type data_ts: ndarray, (n_samples, n_features)
+    #     :param cov_tr: covariates for training set.
+    #     :type cov_tr: ndarray, (n_samples, n_covariates)
+    #     :param cov_ts: covariates for test set.
+    #     :type cov_ts: ndarray, (n_samples, n_covariates)
+    #     :param nclust: best number of clusters, default None.
+    #     :type nclust: int
+    #     :param tr_lab: clustering labels for the training set. If not None
+    #         the clustering algorithm is not performed and the classifier is fitted.
+    #         Available for clustering methods without `n_clusters` parameter. Default None.
+    #     :type tr_lab: array-like
+    #     :param combined_data: if True, only grey matter features will be corrected for TIV. 
+    #         Otherwise, both grey matter and white matter features will be adjusted for the same set of covariates.
+    #     :type: boolean value
+    #     :return: labels and accuracy for both training and test sets.
+    #     :rtype: namedtuple, (train_cllab: array, train_acc:float, test_cllab:array, test_acc:float)
+    #     """
+    #     data_tr_array = [np.array(mod_tr[mod]) for mod in mod_tr]
+    #     data_ts_array = [np.array(mod_ts[mod]) for mod in mod_ts]
+    #     cov_tr_array = [np.array(cov_tr[mod]) for mod in cov_tr]
+    #     cov_ts_array = [np.array(cov_ts[mod]) for mod in cov_ts]
+        
+    #     if isinstance(tr_lab, list):
+    #         tr_lab = np.array(tr_lab)
+    #     try:
+    #         if 'n_clusters' in self.clust_method.get_params().keys():
+    #             self.clust_method.n_clusters = nclust
+    #             train_cor_dic, test_cor_dic = super().GLMcorrection_multimodal(tr_idx, val_idx)
+    #             tr_misc, modelfit, labels_tr = super().train(X_train_cor)
+    #         elif 'n_components' in self.clust_method.get_params().keys():
+    #             self.clust_method.n_clusters = nclust
+    #             X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
+    #             tr_misc, modelfit, labels_tr = super().train(X_train_cor)
+    #         else:
+    #             X_train_cor, X_test_cor = super().GLMcorrection(data_tr, diagnosis_tr, cov_tr, data_ts, cov_ts, num_col_DTI)
+    #             tr_misc, modelfit, labels_tr = super().train(X_train_cor, tr_lab)
+    #         ts_misc, labels_ts = super().test(X_test_cor, modelfit)
+    #     except TypeError:
+    #         logging.info(f"Not possible to perform evaluation on the test set. "
+    #                      f"No clusters were identified with "
+    #                      f"{self.clust_method}")
+    #         return None
+
+    #     Eval = namedtuple('Eval',
+    #                   ['train_cllab', 'train_acc', 'test_cllab', 'test_acc'])
+    #     out = Eval(labels_tr, 1 - tr_misc, labels_ts, 1 - ts_misc)
+    #     return out
