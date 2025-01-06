@@ -1,3 +1,9 @@
+"""
+@author: Federica Colombo
+         Psychiatry and Clinical Psychobiology Unit, Division of Neuroscience, 
+         IRCCS San Raffaele Scientific Institute, Milan, Italy
+"""
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import matthews_corrcoef, accuracy_score, f1_score, \
@@ -121,5 +127,3 @@ def compute_metrics(class_labels, clust_labels, perm=False):
                   'recall': recall_score(class_labels, perm_clust_labels, average='macro',
                                          zero_division=0)}
     return scores
-
-
