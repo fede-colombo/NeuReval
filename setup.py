@@ -5,14 +5,14 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="neureval",
-    version="0.1.0",
+    version="1.1.0",
     author="Federica Colombo",
     author_email="f.colombo8@studenti.unisr.it",
     description="Stability-based relative clustering validation algorithm for neuroimaging data",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/fede-colombo/NeuReval",
-    download_url="https://github.com/fede-colombo/NeuReval/releases/tag/v0.1.0",
+    download_url="https://github.com/fede-colombo/NeuReval/releases/tag/v1.1.0",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
