@@ -150,7 +150,11 @@ neureval.internal_baselines_confounds.select_best(data, modalities, covariates, 
 **Notes**: in case Gaussian Mixture Model was implemented as clustering algorithm, the ```select_best_bic_aic``` function can be used to compute Akaike and Bayesian Information Criterion (AIC, BIC) and used them for model's selection.
 
 ### v. External validation <a name="Validation"></a>
-To test the replicability of clustering solutions in an external dataset, the ```evaluate_confounds(data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None)``` function within the ```neureval.best_nclust_cv_confounds``` method can be used.
+To test the replicability of clustering solutions in an external dataset, the ```evaluate_confounds``` function within the ```neureval.best_nclust_cv_confounds``` method can be used:
+
+```python
+neureval.best_nclust_cv_confounds.evaluate_confounds(data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None)
+ ```
 
 Parameters to be specified:
 - **data** : complete dataset with both training and hold-out sets
