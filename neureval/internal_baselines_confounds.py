@@ -1,14 +1,25 @@
+
+"""
+@author: Federica Colombo
+         Psychiatry and Clinical Psychobiology Unit, Division of Neuroscience, 
+         IRCCS San Raffaele Scientific Institute, Milan, Italy
+"""
+
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+import math
 
-
-def select_best(data, covariates, c, int_measure, preprocessing=None, select='max', nclust_range=None, combined_data=False):
+def select_best(data, modalities, covariates, c, int_measure, preprocessing=None, select='max', nclust_range=None):
     """
     Select the best number of clusters that minimizes/maximizes
     the internal measure selected.
 
     :param data: dataset.
     :type data: array-like
+    :param modalities: dictionary specifying the datasets for each type of input features
+    :type modalities: dictionary
+    :param covariates: dictionary specifying the covariates for each type of input features
+    :type covariates: dictionary
     :param c: clustering algorithm class.
     :type c: obj
     :param int_measure: internal measure function.
@@ -16,70 +27,43 @@ def select_best(data, covariates, c, int_measure, preprocessing=None, select='ma
     :param preprocessing: data reduction algorithm class, default None.
     :type preprocessing: obj
     :param select: it can be 'min', if the internal measure is to be minimized
-        or 'max' if the internal measure should be macimized.
+        or 'max' if the internal measure should be maximized.
     :type select: str
     :param nclust_range: Range of clusters to consider, default None.
     :type nclust_range: list
-    :param combined_data: define whether multimodal data are used as input features. 
-        If True, different sets of covariates will be applied for each modality
-        e.g. correction for TIV only for grey matter features. Default False
-    :type combined_data: boolean value
     :return: internal score and best number of clusters.
     :rtype: float, int
     """
-    data_array = np.array(data.iloc[:,2:])
-    Y_array = np.array(data.iloc[:,1])
-    cov_array = np.array(covariates.iloc[:,2:])
+    X_dic = {mod:None for mod in modalities}
+    cov_dic = {mod:None for mod in modalities}
     
-    if combined_data is not False:    
-        num_col_DTI = len(data.loc[:,:"ACR"].T)
-        
-        data_DTI = data_array[:,num_col_DTI-3:]
-        num_col_GM = len(data_array.T) - len(data_DTI.T)
-        data_GM = data_array[:,:num_col_GM]
-        cov_GM = cov_array
-        cov_DTI = cov_array[:,:len(cov_array.T)-1]
+    for mod in modalities:
+       X_dic[mod] = np.array(modalities[mod])
+       cov_dic[mod] = np.array(covariates[mod])
+       
+    # normalize the covariate z-scoring
+    X_scaled_dic = {mod:None for mod in modalities}
+    cov_scaled_dic = {mod:None for mod in modalities}
+    scaler = StandardScaler()
+   
+    for mod in modalities:
+       X_scaled_dic[mod] = scaler.fit_transform(X_dic[mod])
+       cov_scaled_dic[mod]= scaler.fit_transform(cov_dic[mod])
+   
+   
+    # Adjust data for confounds of covariate
+    X_cor_dic = {mod:None for mod in modalities}
     
-        ### normalize the data and covariates
-        scaler = StandardScaler()
-        scaled_data = []
-        scaled_covar = []
-        for data, cov in [
-                (data_GM, cov_GM),
-                (data_DTI, cov_DTI)]:
-            data = scaler.fit_transform(data)
-            cov = scaler.fit_transform(cov)
-            scaled_data.append(data)
-            scaled_covar.append(cov)
-        
-        ### Adjust data for confounds of covariates
-        cor_data = []
-        for X, Y in [
-            (scaled_covar[0], scaled_data[0]), 
-            (scaled_covar[1], scaled_data[1])
-        ]:
-            beta = np.linalg.lstsq(X, Y, rcond=None)
-            Xc = (Y.T - beta[0].T @ X.T).T
-            cor_data.append(Xc)
-        
-        X_cor = np.concatenate((cor_data[0], cor_data[1]), axis=1)
+    for mod in modalities:
+       beta = np.linalg.lstsq(cov_scaled_dic[mod], X_scaled_dic[mod], rcond=None)
+       X_cor_dic[mod] = (X_scaled_dic[mod].T - beta[0].T @ cov_scaled_dic[mod].T).T
     
-    else:
-        ### normalize the data and covariates
-        scaler = StandardScaler()
-        data_array = scaler.fit_transform(data_array)
-        cov_array = scaler.fit_transform(cov_array)
-         
-        ### Adjust data for confounds of covariates
-        Y = data_array
-        X = cov_array
-        beta = np.linalg.lstsq(X, Y, rcond=None)
-        X_cor = (Y.T - beta[0].T @ X.T).T
+    corr_data = np.concatenate([np.array(X_cor_dic[mod]) for mod in X_cor_dic], axis=1)
     
     if preprocessing is not None:
-        X_cor = preprocessing.fit_transform(X_cor)
+        corr_data = preprocessing.fit_transform(corr_data)
     else:
-        X_cor = X_cor
+        corr_data = corr_data
         
     if nclust_range is not None:
         scores = []
@@ -89,12 +73,12 @@ def select_best(data, covariates, c, int_measure, preprocessing=None, select='ma
                 c.n_clusters = ncl
             else:
                 c.n_components = ncl
-            label = c.fit_predict(X_cor)
-            scores.append(int_measure(X_cor, label))
+            label = c.fit_predict(corr_data)
+            scores.append(int_measure(corr_data, label))
             label_vect.append(label)
     else:
-        label = c.fit_predict(X_cor)
-        best = int_measure(X_cor, label)
+        label = c.fit_predict(corr_data)
+        best = int_measure(corr_data, label)
         return best, len([lab for lab in np.unique(label) if lab >= 0]), label
         
     if select == 'max':
@@ -106,94 +90,74 @@ def select_best(data, covariates, c, int_measure, preprocessing=None, select='ma
     else:
         return scores[int(max(best))], len(set(label_vect[int(max(best))])), label_vect[int(max(best))]
 
-def select_best_bic_aic(data, covariates, c, preprocessing=None, score='bic', nclust_range=None, combined_data=False):
+
+def select_best_bic_aic(data, modalities, covariates, c, preprocessing=None, score='bic', nclust_range=None):
     """
     Function that selects the best number of clusters that minimizes BIC and AIC 
     in Gaussian Mixture Models.
 
     :param data: dataset.
     :type data: array-like
+    :param modalities: dictionary specifying the datasets for each type of input features
+    :type modalities: dictionary
+    :param covariates: dictionary specifying the covariates for each type of input features
+    :type covariates: dictionary
     :param c: clustering algorithm class.
     :type c: obj
-    :param preprocessing: dimensionality reduction algorithm class, default None.
+    :param int_measure: internal measure function.
+    :type int_measure: obj
+    :param preprocessing: data reduction algorithm class, default None.
     :type preprocessing: obj
     :param score: type of score to compute. It could be 'bic' for BIC score, 'aic' for AIC score
     :type score: str
     :param nclust_range: Range of clusters to consider, default None.
     :type nclust_range: list
-    :param combined_data: define whether multimodal data are used as input features. 
-        If True, different sets of covariates will be applied for each modality
-        e.g. correction for TIV only for grey matter features. Default False
-    :type combined_data: boolean value
     :return: BIC or AIC score and best number of clusters.
     :rtype: float, int
     """
     
-    data_array = np.array(data.iloc[:,2:])
-    Y_array = np.array(data.iloc[:,1])
-    cov_array = np.array(covariates.iloc[:,2:])
+    X_dic = {mod:None for mod in modalities}
+    cov_dic = {mod:None for mod in modalities}
     
-    if combined_data is not False:    
-        num_col_DTI = len(data.loc[:,:"ACR"].T)
-        
-        data_DTI = data_array[:,num_col_DTI-3:]
-        num_col_GM = len(data_array.T) - len(data_DTI.T)
-        data_GM = data_array[:,:num_col_GM]
-        cov_GM = cov_array
-        cov_DTI = cov_array[:,:len(cov_array.T)-1]
+    for mod in modalities:
+       X_dic[mod] = np.array(modalities[mod])
+       cov_dic[mod] = np.array(covariates[mod])
+       
+    # normalize the covariate z-scoring
+    X_scaled_dic = {mod:None for mod in modalities}
+    cov_scaled_dic = {mod:None for mod in modalities}
+    scaler = StandardScaler()
+   
+    for mod in modalities:
+       X_scaled_dic[mod] = scaler.fit_transform(X_dic[mod])
+       cov_scaled_dic[mod]= scaler.fit_transform(cov_dic[mod])
+   
+   
+    # Adjust data for confounds of covariate
+    X_cor_dic = {mod:None for mod in modalities}
     
-        ### normalize the data and covariates
-        scaler = StandardScaler()
-        scaled_data = []
-        scaled_covar = []
-        for data, cov in [
-                (data_GM, cov_GM),
-                (data_DTI, cov_DTI)]:
-            data = scaler.fit_transform(data)
-            cov = scaler.fit_transform(cov)
-            scaled_data.append(data)
-            scaled_covar.append(cov)
-        
-        ### Adjust data for confounds of covariates
-        cor_data = []
-        for X, Y in [
-            (scaled_covar[0], scaled_data[0]), 
-            (scaled_covar[1], scaled_data[1])
-        ]:
-            beta = np.linalg.lstsq(X, Y, rcond=None)
-            Xc = (Y.T - beta[0].T @ X.T).T
-            cor_data.append(Xc)
-        
-        X_cor = np.concatenate((cor_data[0], cor_data[1]), axis=1)
+    for mod in modalities:
+       beta = np.linalg.lstsq(cov_scaled_dic[mod], X_scaled_dic[mod], rcond=None)
+       X_cor_dic[mod] = (X_scaled_dic[mod].T - beta[0].T @ cov_scaled_dic[mod].T).T
     
-    else:
-        ### normalize the data and covariates
-        scaler = StandardScaler()
-        data_array = scaler.fit_transform(data_array)
-        cov_array = scaler.fit_transform(cov_array)
-         
-        ### Adjust data for confounds of covariates
-        Y = data_array
-        X = cov_array
-        beta = np.linalg.lstsq(X, Y, rcond=None)
-        X_cor = (Y.T - beta[0].T @ X.T).T
+    corr_data = np.concatenate([np.array(X_cor_dic[mod]) for mod in X_cor_dic], axis=1)
     
     if preprocessing is not None:
-        X_cor = preprocessing.fit_transform(X_cor)
+        corr_data = preprocessing.fit_transform(corr_data)
     else:
-        X_cor = X_cor
+        corr_data = corr_data
         
     if nclust_range is not None:
         scores=[]
         label_vect=[]
         for components in nclust_range:
             c.n_components = components
-            label = c.fit_predict(X_cor)
+            label = c.fit_predict(corr_data)
             if score=='bic':
-                bic_scores = c.bic(X_cor)
+                bic_scores = c.bic(corr_data)
                 scores.append(bic_scores)
             elif score=='aic':
-                aic_scores = c.aic(X_cor)
+                aic_scores = c.aic(corr_data)
                 scores.append(aic_scores)
             label_vect.append(label)
     
@@ -201,13 +165,17 @@ def select_best_bic_aic(data, covariates, c, preprocessing=None, score='bic', nc
     return scores[int(max(best))], len(set(label_vect[int(max(best))])), label_vect[int(max(best))]
 
 
-def evaluate_best(data, covariates, c, int_measure, preprocessing=None, ncl=None, combined_data=False):
+def evaluate_best(data, modalities, covariates, c, int_measure, ncl=None):
     """
     Function that, given a number of clusters, returns the corresponding internal measure
     for a dataset.
 
     :param data: dataset.
     :type data: array-like
+    :param modalities: dictionary specifying the datasets for each type of input features
+    :type modalities: dictionary
+    :param covariates: dictionary specifying the covariates for each type of input features
+    :type covariates: dictionary
     :param c: clustering algorithm class.
     :type c: obj
     :param int_measure: internal measure function.
@@ -223,64 +191,36 @@ def evaluate_best(data, covariates, c, int_measure, preprocessing=None, ncl=None
     :return: internal score.
     :rtype: float
     """
-    data_array = np.array(data.iloc[:,2:])
-    Y_array = np.array(data.iloc[:,1])
-    cov_array = np.array(covariates.iloc[:,2:])
+    X_dic = {mod:None for mod in modalities}
+    cov_dic = {mod:None for mod in modalities}
     
-    if combined_data is not False:    
-        num_col_DTI = len(data.loc[:,:"ACR"].T)
-        
-        data_DTI = data_array[:,num_col_DTI-3:]
-        num_col_GM = len(data_array.T) - len(data_DTI.T)
-        data_GM = data_array[:,:num_col_GM]
-        cov_GM = cov_array
-        cov_DTI = cov_array[:,:len(cov_array.T)-1]
+    for mod in modalities:
+       X_dic[mod] = np.array(modalities[mod])
+       cov_dic[mod] = np.array(covariates[mod])
+       
+    # normalize the covariate z-scoring
+    X_scaled_dic = {mod:None for mod in modalities}
+    cov_scaled_dic = {mod:None for mod in modalities}
+    scaler = StandardScaler()
+   
+    for mod in modalities:
+       X_scaled_dic[mod] = scaler.fit_transform(X_dic[mod])
+       cov_scaled_dic[mod]= scaler.fit_transform(cov_dic[mod])
+   
+   
+    # Adjust data for confounds of covariate
+    X_cor_dic = {mod:None for mod in modalities}
     
-        ### normalize the data and covariates
-        scaler = StandardScaler()
-        scaled_data = []
-        scaled_covar = []
-        for data, cov in [
-                (data_GM, cov_GM),
-                (data_DTI, cov_DTI)]:
-            data = scaler.fit_transform(data)
-            cov = scaler.fit_transform(cov)
-            scaled_data.append(data)
-            scaled_covar.append(cov)
-        
-        ### Adjust data for confounds of covariates
-        cor_data = []
-        for X, Y in [
-            (scaled_covar[0], scaled_data[0]), 
-            (scaled_covar[1], scaled_data[1])
-        ]:
-            beta = np.linalg.lstsq(X, Y, rcond=None)
-            Xc = (Y.T - beta[0].T @ X.T).T
-            cor_data.append(Xc)
-        
-        X_cor = np.concatenate((cor_data[0], cor_data[1]), axis=1)
+    for mod in modalities:
+       beta = np.linalg.lstsq(cov_scaled_dic[mod], X_scaled_dic[mod], rcond=None)
+       X_cor_dic[mod] = (X_scaled_dic[mod].T - beta[0].T @ cov_scaled_dic[mod].T).T
+
+    corr_data = [np.array(X_cor_dic[mod]) for mod in X_cor_dic]
     
-    else:
-        ### normalize the data and covariates
-        scaler = StandardScaler()
-        data_array = scaler.fit_transform(data_array)
-        cov_array = scaler.fit_transform(cov_array)
-         
-        ### Adjust data for confounds of covariates
-        Y = data_array
-        X = cov_array
-        beta = np.linalg.lstsq(X, Y, rcond=None)
-        X_cor = (Y.T - beta[0].T @ X.T).T
-    
-    if preprocessing is not None:
-        X_cor = preprocessing.fit_transform(X_cor)
-    else:
-        X_cor = X_cor
-        
     if 'n_clusters' in c.get_params().keys():
         c.n_clusters = ncl
     else:
         c.n_components = ncl
-        label = c.fit_predict(X_cor)
+        label = c.fit_predict(corr_data)
     
-    return int_measure(X_cor, label)
+    return int_measure(corr_data, label)
