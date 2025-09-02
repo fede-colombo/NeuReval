@@ -12,7 +12,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/fede-colombo/NeuReval",
-    download_url="https://github.com/fede-colombo/NeuReval/releases/tag/v1.1.0",
+    download_url="https://github.com/fede-colombo/NeuReval/releases/tag/v1.1.1",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3",
