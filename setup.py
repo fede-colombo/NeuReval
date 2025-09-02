@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="neureval",
-    version="1.1.0",
+    version="1.1.1",
     author="Federica Colombo",
     author_email="f.colombo8@studenti.unisr.it",
     description="Stability-based relative clustering validation algorithm for neuroimaging data",
