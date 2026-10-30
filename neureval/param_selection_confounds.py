@@ -5,7 +5,9 @@
 """
 
 from neureval.relative_validation_confounds import RelativeValidationConfounds
-from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds, _prepare_folds
+from neureval.best_nclust_cv_confounds import (FindBestClustCVConfounds, _prepare_folds,
+                                               _prepare_folds_multi, _run_tasks, _check_n_jobs)
+from sklearn.base import clone
 from sklearn.model_selection import ParameterGrid
 import multiprocessing as mp
 import logging
@@ -34,7 +36,8 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
     :type cv: int
     :param clust_range: list with number of clusters to investigate.
     :type clust_range: list
-    :param n_jobs: number of jobs to run in parallel, default (number of cpus - 1).
+    :param n_jobs: number of jobs to run in parallel, default 1.
+        Negative values follow the joblib convention: -1 uses all CPUs, -2 all CPUs but one.
     :type n_jobs: int
     :param iter_cv: number of repeated cv loops, default 1.
     :type iter_cv: int
@@ -60,10 +63,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         self.cv = cv
         self.iter_cv = iter_cv
         self.clust_range = clust_range
-        if abs(n_jobs) > mp.cpu_count():
-            self.n_jobs = mp.cpu_count()
-        else:
-            self.n_jobs = abs(n_jobs)
+        self.n_jobs = _check_n_jobs(n_jobs)
         self.strat = strat
 
     def fit(self, data_tr, mod_tr, cov_tr, nclass=None):
@@ -90,23 +90,22 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         if self.preproc_method is not None:
             grid = {'c': ParameterGrid(self.params['c']), 's': ParameterGrid(self.params['s']), 'preprocessing': ParameterGrid(self.params['preprocessing'])}
             preproc_grid = list(grid['preprocessing'])
-            folds_by_preproc = []
-            for param_preproc in preproc_grid:
-                self.preproc_method.set_params(**param_preproc)
-                reval = RelativeValidationConfounds(self.clust_method, self.class_method,
-                                                    self.preproc_method, self.nrand)
-                folds_by_preproc.append(_prepare_folds(reval, data_tr, mod_tr, cov_tr,
-                                                      self.cv, self.iter_cv, self.strat))
+            revals = [RelativeValidationConfounds(self.clust_method, self.class_method,
+                                                  clone(self.preproc_method).set_params(**param_preproc),
+                                                  self.nrand)
+                      for param_preproc in preproc_grid]
+            folds_by_preproc = _prepare_folds_multi(revals, data_tr, mod_tr, cov_tr, self.cv,
+                                                    self.iter_cv, self.strat, self.n_jobs)
             new_grid = list(itertools.product(grid['c'], grid['s'], preproc_grid))
-            new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1], ng[2],
-                           folds_by_preproc[preproc_grid.index(ng[2])])
+            new_params = [(ng[0], ng[1], ng[2], folds_by_preproc[preproc_grid.index(ng[2])])
                           for ng in new_grid if self._allowed_par(ng[0])]
         else:
             grid = {'c': ParameterGrid(self.params['c']), 's': ParameterGrid(self.params['s'])}
             reval = RelativeValidationConfounds(self.clust_method, self.class_method, None, self.nrand)
-            folds = _prepare_folds(reval, data_tr, mod_tr, cov_tr, self.cv, self.iter_cv, self.strat)
+            folds = _prepare_folds(reval, data_tr, mod_tr, cov_tr, self.cv, self.iter_cv, self.strat,
+                                   self.n_jobs)
             new_grid = list(itertools.product(grid['c'], grid['s']))
-            new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1], folds) for ng in new_grid if self._allowed_par(ng[0])]
+            new_params = [(ng[0], ng[1], None, folds) for ng in new_grid if self._allowed_par(ng[0])]
 
         if len(new_grid) != len(new_params):
             logging.info(f"Dropped {len(new_grid) - len(new_params)} out of {len(new_grid)} parameter "
@@ -116,20 +115,34 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         logging.info(f'Running {len(new_params)} combinations of '
                       f'parameters...\n')
 
-        if self.preproc_method is not None:
-            run_fn = self._run_gridsearchcv_preproc
-        else:
-            run_fn = self._run_gridsearchcv
+        # Build the tasks of all parameter combinations (one task for each combination,
+        # fold and number of clusters) and run them in a single parallel queue, so that
+        # all the CPUs are kept busy even when there are few parameter combinations.
+        # Each combination gets its own copy (clone) of the estimators.
+        combinations, all_tasks = [], []
+        for param_c, param_s, param_preproc, folds in new_params:
+            c = clone(self.clust_method).set_params(**param_c)
+            s = clone(self.class_method).set_params(**param_s)
+            preproc = None
+            if param_preproc is not None:
+                preproc = clone(self.preproc_method).set_params(**param_preproc)
+            findclust = FindBestClustCVConfounds(c, s, preprocessing=preproc, nrand=self.nrand,
+                                                 nfold=self.cv, n_jobs=1,
+                                                 nclust_range=self.clust_range)
+            reval = RelativeValidationConfounds(c, s, preproc, self.nrand)
+            tasks = findclust._make_tasks(reval, folds)
+            combinations.append((param_c, param_s, param_preproc, findclust, tasks))
+            all_tasks.extend(tasks)
 
-        # Start worker processes only when parallelism is requested.
-        # With n_jobs=1 everything runs in the current process, so scripts
-        # work without the if __name__ == '__main__' guard (needed by the
-        # 'spawn'/'forkserver' start methods used on Windows, macOS and Python>=3.14).
-        if self.n_jobs > 1:
-            with mp.Pool(processes=self.n_jobs) as p:
-                out = list(zip(*p.starmap(run_fn, new_params)))
-        else:
-            out = list(zip(*[run_fn(*par) for par in new_params]))
+        task_out = _run_tasks(all_tasks, self.n_jobs)
+
+        perf_list, start = [], 0
+        for param_c, param_s, param_preproc, findclust, tasks in combinations:
+            result = findclust._aggregate_results(tasks, task_out[start:start + len(tasks)])
+            start += len(tasks)
+            perf_list.append(_combination_perf(param_c, param_s, param_preproc,
+                                               result, findclust.cv_results_))
+        out = list(zip(*perf_list))
 
         # cv_results_
         res_dict = _create_result_table(out)
@@ -216,154 +229,6 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         return self
      
 
-    def _run_gridsearchcv(self, data, modalities, covariates, param_c, param_s, prepared_folds=None):
-        """
-        Private method that initializes classifier/clustering/preprocessing with different
-        parameter combinations and :class:`neureval.best_nclust_cv_confounds.FindBestClustCVConfounds`.
-
-        :param data: dataset.
-        :type data: numpy array
-        :param modalities: dictionary specifying the dataset for each type of input features
-        :type modalities: dictionary
-        :param covariates: dictionary specifying the covariates ofr each type of input features
-        :type covariates: dictionary
-        :param param_c: dictionary of clustering parameters.
-        :type param_c: dictionary
-        :param param_c: dictionary of clustering parameters.
-        :type param_c: dictionary
-        :param prepared_folds: folds prepared once with
-            :func:`neureval.best_nclust_cv_confounds._prepare_folds`, default None.
-        :type prepared_folds: list
-        :return: performance list.
-        :rtype: list
-        """
-        self.clust_method.set_params(**param_c)
-        self.class_method.set_params(**param_s)
-       
-        findclust = FindBestClustCVConfounds(nfold=self.cv,
-                                             c=self.clust_method,
-                                             s=self.class_method,
-                                             preprocessing=self.preproc_method,
-                                             nrand=self.nrand,n_jobs=1,
-                                             nclust_range=self.clust_range)
-                                             
-        if self.clust_range is not None:
-                metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
-                                                                        prepared_folds=prepared_folds)
-                #tr_lab = None
-        else:
-                try:
-                    metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
-                                                                        prepared_folds=prepared_folds)
-                except TypeError:
-                    perf =  [(key, val) for key, val in param_c.items()] + \
-                            [(key, val) for key, val in param_s.items()] + \
-                            [('best_nclust', None),
-                            ('mean_train_score', None),
-                            ('sd_train_score', None),
-                            ('mean_val_score', None),
-                            ('sd_val_score', None),
-                            ('validation_meanerror', None),
-                            ('tr_label', None),
-                            ]
-                    return perf
-                
-
-        perf =  [(key, val) for key, val in param_c.items()] + \
-                [(key, val) for key, val in param_s.items()] + \
-                [('best_nclust', nclbest),
-                    ('mean_train_score', np.mean(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_tr'])),
-                    ('sd_train_score', np.std(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_tr'])),
-                    ('mean_val_score', np.mean(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_val'])),
-                    ('sd_val_score', np.std(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_val'])),
-                    ('validation_meanerror', metric['val'][nclbest]),
-                    ('tr_label', tr_lab),
-                    ]
-        return perf
-        
-    def _run_gridsearchcv_preproc(self, data, modalities, covariates, param_c, param_s, param_preproc,
-                                  prepared_folds=None):
-        """
-        Private method that initializes classifier/clustering/preprocessing with different
-        parameter combinations and :class:`neureval.best_nclust_cv_confounds.FindBestClustCVConfounds`.
-
-        :param data: dataset.
-        :type data: numpy array
-        :param modalities: dictionary specifying the dataset for each type of input features
-        :type modalities: dictionary
-        :param covariates: dictionary specifying the covariates ofr each type of input features
-        :type covariates: dictionary
-        :param param_c: dictionary of clustering parameters.
-        :type param_c: dictionary
-        :param param_c: dictionary of clustering parameters.
-        :type param_c: dictionary
-        :param param_preproc: dictionary of preprocessing parameters.
-        :type param_preproc: dictionary
-        :param prepared_folds: folds prepared once with
-            :func:`neureval.best_nclust_cv_confounds._prepare_folds` using these
-            preprocessing parameters, default None.
-        :type prepared_folds: list
-        :return: performance list.
-        :rtype: list
-        """
-        self.clust_method.set_params(**param_c)
-        self.class_method.set_params(**param_s)
-        self.preproc_method.set_params(**param_preproc)
-       
-        findclust = FindBestClustCVConfounds(nfold=self.cv,
-                                             c=self.clust_method,
-                                             s=self.class_method,
-                                             preprocessing=self.preproc_method,
-                                             nrand=self.nrand,n_jobs=1,
-                                             nclust_range=self.clust_range)
-                                             
-        if self.clust_range is not None:
-                metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
-                                                                        prepared_folds=prepared_folds)
-                #tr_lab = None
-        else:
-                try:
-                    metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
-                                                                        prepared_folds=prepared_folds)
-                except TypeError:
-                    perf =  [(key, val) for key, val in param_c.items()] + \
-                            [(key, val) for key, val in param_s.items()] + \
-                            [(key, val) for key, val in param_preproc.items()] + \
-                            [('best_nclust', None),
-                            ('mean_train_score', None),
-                            ('sd_train_score', None),
-                            ('mean_val_score', None),
-                            ('sd_val_score', None),
-                            ('validation_meanerror', None),
-                            ('tr_label', None),
-                            ]
-                    return perf
-                
-
-        perf =  [(key, val) for key, val in param_c.items()] + \
-                [(key, val) for key, val in param_s.items()] + \
-                [(key, val) for key, val in param_preproc.items()] + \
-                [('best_nclust', nclbest),
-                    ('mean_train_score', np.mean(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_tr'])),
-                    ('sd_train_score', np.std(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_tr'])),
-                    ('mean_val_score', np.mean(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_val'])),
-                    ('sd_val_score', np.std(
-                        findclust.cv_results_.loc[findclust.cv_results_.ncl == nclbest]['ms_val'])),
-                    ('validation_meanerror', metric['val'][nclbest]),
-                    ('tr_label', tr_lab),
-                    ]
-        return perf    
-        
-        
-        
-    
     def _allowed_par(self, par_dict):
         """
         Private method that controls the allowed parameter combinations
@@ -423,6 +288,48 @@ def _return_knownbest(val_perf, idx):
     """
     bidx = _return_best([val_perf[i] for i in idx])
     return [idx[b] for b in bidx]
+
+
+def _combination_perf(param_c, param_s, param_preproc, result, cv_results):
+    """
+    Private function that builds the performance list of one parameter combination.
+
+    :param param_c: clustering parameters.
+    :type param_c: dict
+    :param param_s: classifier parameters.
+    :type param_s: dict
+    :param param_preproc: preprocessing parameters, None if no preprocessing.
+    :type param_preproc: dict
+    :param result: output of
+        :meth:`neureval.best_nclust_cv_confounds.FindBestClustCVConfounds._aggregate_results`
+        (metrics, best number of clusters, labels), or None if no clusters were found.
+    :type result: tuple
+    :param cv_results: cross-validation results table of this combination.
+    :type cv_results: pandas DataFrame
+    :return: performance list.
+    :rtype: list
+    """
+    perf = [(key, val) for key, val in param_c.items()] + \
+           [(key, val) for key, val in param_s.items()]
+    if param_preproc is not None:
+        perf += [(key, val) for key, val in param_preproc.items()]
+    if result is None:
+        return perf + [('best_nclust', None),
+                       ('mean_train_score', None),
+                       ('sd_train_score', None),
+                       ('mean_val_score', None),
+                       ('sd_val_score', None),
+                       ('validation_meanerror', None),
+                       ('tr_label', None)]
+    metric, nclbest, tr_lab = result
+    best_rows = cv_results.loc[cv_results.ncl == nclbest]
+    return perf + [('best_nclust', nclbest),
+                   ('mean_train_score', np.mean(best_rows['ms_tr'])),
+                   ('sd_train_score', np.std(best_rows['ms_tr'])),
+                   ('mean_val_score', np.mean(best_rows['ms_val'])),
+                   ('sd_val_score', np.std(best_rows['ms_val'])),
+                   ('validation_meanerror', metric['val'][nclbest]),
+                   ('tr_label', tr_lab)]
 
 
 def _create_result_table(out):

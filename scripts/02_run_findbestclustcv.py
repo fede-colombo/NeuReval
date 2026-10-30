@@ -204,53 +204,105 @@ pkl.dump(bic_results, open('./bic_results_model_name.pkl', 'wb'))
 
 
 ### 3. EXTERNAL VALIDATION
+# This section can be run on its own, without the previous ones.
 
-# In order to perform external validation in hold-out dataset, the training and hold-out sets
-# should be organized in the same excel file. Specifically, patients belonging to the hold-out set
-# should be placed after those belonging to the training set (see example_data). The same organization
-# is required for the covariates sets
+# Make the required imports
+import os
+import pandas as pd
+from sklearn.svm import SVC
+from sklearn.mixture import GaussianMixture
+from umap import UMAP
+from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
+from neureval.utils import load_table
 
-# Import data and covariates files for the complete data and covariates files (training + hold-out sets in the same file)
+# Define working directories and specify the folder 'models'
+main_path = 'path/to/working/directory'
+data_path = os.path.join(main_path, 'models')
+
+# Define output folder called 'results'.
+# Within 'results', define the subfolder corresponding to the input features (e.g., 'GM + FA').
+# Within this subfolder, specify the folder corresponding to the set of covariates used (e.g., 'age_sex_TIV')
+out_dir = os.path.join(data_path, 'results', 'feature_name', 'covariates')
+os.makedirs(out_dir, exist_ok=True)
+os.chdir(out_dir)
+
+# Name of the column with the subjects' IDs (the same in all files, e.g. 'Subject_ID' or 'IDNUM')
+id_col = 'Subject_ID'
+
+# Import the complete data and covariates files (training + hold-out subjects, in any order).
+# The covariates file must contain the same subjects, in the same order as the data file.
 data_all_file = 'database_all_name.xlsx'
 cov_all_file = 'covariates_all_name.xlsx'
-# For Excel files with multiple sheets, add sheet_name='sheet_name' (default: first sheet)
-data_all = load_table(os.path.join(data_path,data_all_file))
+# Supported formats: .csv, .xlsx, .xls. For Excel files with multiple sheets, add sheet_name='sheet_name' (default: first sheet)
+data_all = load_table(os.path.join(data_path, data_all_file))
 cov_all = load_table(os.path.join(data_path, cov_all_file))
 
-# Specify the number of subjects belonging to the training set
-training_dim = 60
-tr_idx = list(range(0,training_dim))
-val_idx = list(range(training_dim-1,len(data)-1))
+if not data_all[id_col].equals(cov_all[id_col]):
+    raise Exception('Data and covariates files must contain the same subjects in the same order. Please check them')
+
+# Import the list of the IDs of the training subjects: a .csv or Excel file with a column named as id_col.
+# For example, the file with the training labels saved in section 1 ('Labels_model_name_training.csv') can be used.
+training_ids_file = 'training_ids.csv'
+training_ids = load_table(os.path.join(data_path, training_ids_file))[id_col]
+
+missing = training_ids[~training_ids.isin(data_all[id_col])]
+if len(missing) > 0:
+    raise Exception(f'{len(missing)} training subjects are missing from the complete file: {missing.tolist()[:10]}')
+if training_ids.duplicated().any():
+    raise Exception('The list of training subjects contains duplicated IDs. Please check it')
+
+# Training and hold-out sets as boolean masks (True = subject belongs to the set)
+tr_idx = data_all[id_col].isin(training_ids).to_numpy()
+val_idx = ~tr_idx
 
 # Check the sample size of training and hold-out sets
-print(f"Training set sample size: {len(tr_idx)}")
-print(f"Validation set sample size: {len(val_idx)}")
+print(f"Training set sample size: {tr_idx.sum()}")
+print(f"Hold-out set sample size: {val_idx.sum()}")
 
-# Define two dictionaries for modalities and covariates variables.
-# For each kind of modality, specify the index of the columuns corresponding to each set of input modality (e.g., DTI, GM, fMRI)
+# Define two dictionaries for modalities and covariates variables, as for the training set.
+# For each kind of modality, specify the index of the columns corresponding to each set of input modality (e.g., DTI, GM, fMRI)
 # You can also specify different sets of covariates for each modality
-modalities_val = {'feature_01': data_all.iloc[:,2:124],
-              'feature_02': data_all.iloc[:,124:272],
-              'feature_03': data_all.iloc[:,272:]}
+modalities_val = {'feature_01': data_all.iloc[:, 2:124],
+                  'feature_02': data_all.iloc[:, 124:272],
+                  'feature_03': data_all.iloc[:, 272:]}
 
-covariates_val = {'feature_01': cov_all.iloc[:,2:],
-              'feature_02': cov_all.iloc[:,2:-2],
-              'feature_03': cov_all.iloc[:,2:-1]}
+covariates_val = {'feature_01': cov_all.iloc[:, 2:],
+                  'feature_02': cov_all.iloc[:, 2:-2],
+                  'feature_03': cov_all.iloc[:, 2:-1]}
+
+# Define classifier, clustering and (if used) preprocessing algorithms with the optimized parameters,
+# the same used in section 1
+s = SVC(C=1, kernel='rbf', random_state=42)
+c = GaussianMixture(covariance_type='full', random_state=42)
+# If you also optimized preprocessing steps, uncomment the following line and set preprocessing=preproc below
+# preproc = UMAP(n_components=2, n_neighbors=30, min_dist=0.0, random_state=42)
+findbestclust = FindBestClustCVConfounds(c, s, preprocessing=None, nrand=10)
+
+# Best number of clusters identified in the training set (bestncl printed in section 1)
+bestncl = 3
 
 # Validate the identified clusters
 # Parameters to be specified:
-# data_tr: dataset on which neureval was trained
-# diagnosis: diagnosis column
-# data_ts: test dataset
-# covariates_tr: covariates for the training set
-# covariates_ts: covariates for the test dataset
-# nclust: specify the best number of clusters idenfied in the training dataset (i.e., bestncl)
+# data_all: complete dataset (training + hold-out sets)
+# modalities_val, covariates_val: modalities and covariates of the complete dataset
+# tr_idx, val_idx: training and hold-out subjects (boolean masks or integer row positions)
+# nclust: best number of clusters identified in the training dataset (i.e., bestncl)
 # tr_lab: clustering labels for the training set. If not None, the clustering algorithm is not performed and the classifier is fitted. Default None
-out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx, nclust=bestncl, tr_lab=None)
-print(f"Training ACC: {out.train_acc}, Test ACC: {out.test_acc}")
+out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx,
+                                       nclust=bestncl, tr_lab=None)
+if out is None:
+    raise Exception('No clusters were identified in the training or hold-out set')
 
-# Save cluster labels in the validation set
-labels_val = pd.DataFrame(out.test_cllab, columns=['Validation_labels'])
-df_val_idnum = data_all.iloc[:,0][val_idx].reset_index()
-df_idnum_labels_val = pd.concat([df_val_idnum, labels_val], axis=1)
-df_idnum_labels_val.to_csv('Labels_val_model_name.csv', index=False)
+print(f"Training ACC: {out.train_acc:.3f}")
+print(f"Hold-out ACC (raw, chance level depends on the number of clusters): {out.test_acc:.3f}")
+print(f"Hold-out normalized stability: {out.test_stability:.3f} "
+      f"(0 = perfect replication, close to 1 = no better than chance)")
+
+# Save the labels of the hold-out subjects:
+# - Holdout_clustering_labels: independent clustering of the hold-out set, matched to the training clusters
+# - Assigned_training_cluster: training cluster assigned to each hold-out subject by the classifier
+labels_val = pd.DataFrame({id_col: data_all[id_col][val_idx].to_numpy(),
+                           'Holdout_clustering_labels': out.test_cllab,
+                           'Assigned_training_cluster': out.test_classlab})
+# Change the .csv file name according to your model
+labels_val.to_csv('Labels_val_model_name.csv', index=False)

@@ -13,6 +13,8 @@ import math
 import logging
 import multiprocessing as mp
 import itertools
+from joblib import Parallel, delayed, effective_n_jobs
+from sklearn.base import clone
 import pandas as pd
 import statistics
 
@@ -21,7 +23,7 @@ logging.basicConfig(format='%(asctime)s, %(levelname)s %(message)s',
                     level=logging.INFO)
 
 
-def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_vect=None):
+def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_vect=None, n_jobs=1):
     """
     Generate the (repeated) cross-validation folds and prepare the data of each
     fold once (confound correction and, if specified, preprocessing) with
@@ -41,16 +43,46 @@ def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_
     :type iter_cv: int
     :param strat_vect: vector for stratification, default None.
     :type strat_vect: ndarray, (n_samples,)
+    :param n_jobs: number of parallel processes, default 1.
+    :type n_jobs: int
     :return: one tuple (train indices, validation indices, prepared training data,
         prepared validation data) for each fold.
     :rtype: list
+    """
+    return _prepare_folds_multi([reval], data, modalities, covariates, nfold,
+                                iter_cv, strat_vect, n_jobs)[0]
+
+
+def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
+                         strat_vect=None, n_jobs=1):
+    """
+    Same as :func:`_prepare_folds` for several `RelativeValidationConfounds` objects
+    (e.g. one for each combination of preprocessing parameters), on the same folds.
+    All (object, fold) pairs are independent and are prepared in a single parallel queue.
+
+    :return: for each object in `revals`, the list of its prepared folds.
+    :rtype: list of lists
     """
     if strat_vect is not None:
         kfold = RepeatedStratifiedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
     else:
         kfold = RepeatedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
-    return [(tr_idx, val_idx) + reval._prepare_fold(modalities, covariates, tr_idx, val_idx)
-            for tr_idx, val_idx in kfold.split(data, strat_vect)]
+    splits = list(kfold.split(data, strat_vect))
+    jobs = [(reval, tr_idx, val_idx) for reval in revals for tr_idx, val_idx in splits]
+    if n_jobs > 1 and len(jobs) > 1:
+        prepared = Parallel(n_jobs=n_jobs)(
+            delayed(_prepare_one)(reval, modalities, covariates, tr_idx, val_idx)
+            for reval, tr_idx, val_idx in jobs)
+    else:
+        prepared = [_prepare_one(reval, modalities, covariates, tr_idx, val_idx)
+                    for reval, tr_idx, val_idx in jobs]
+    n = len(splits)
+    return [prepared[i * n:(i + 1) * n] for i in range(len(revals))]
+
+
+def _prepare_one(reval, modalities, covariates, tr_idx, val_idx):
+    """Prepare one fold: (train indices, validation indices, prepared train, prepared validation)."""
+    return (tr_idx, val_idx) + reval._prepare_fold(modalities, covariates, tr_idx, val_idx)
 
 
 class FindBestClustCVConfounds(RelativeValidationConfounds):
@@ -79,6 +111,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         :class:`neureval.relative_validation.RelativeValidation` class.
     :type nrand: int
     :param n_jobs: number of processes to be run in parallel, default 1.
+        Negative values follow the joblib convention: -1 uses all CPUs, -2 all CPUs but one.
     :type n_jobs: int
 
     :attribute: cv_results_ dataframe with cross validation results. Columns are
@@ -92,10 +125,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         """
         super().__init__(c, s, preprocessing, nrand)
         self.nfold = nfold
-        if abs(n_jobs) > mp.cpu_count():
-            self.n_jobs = mp.cpu_count()
-        else:
-            self.n_jobs = abs(n_jobs)
+        self.n_jobs = _check_n_jobs(n_jobs)
         self.nclust_range = nclust_range
 
     def best_nclust_confounds(self, data, modalities, covariates, iter_cv=1, strat_vect=None,
@@ -132,32 +162,42 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         # compute them once per fold and reuse them for every number of clusters.
         if prepared_folds is None:
             prepared_folds = _prepare_folds(reval, data, modalities, covariates,
-                                           self.nfold, iter_cv, strat_vect)
-        if self.nclust_range is not None and 'n_clusters' in self.clust_method.get_params().keys():
-            params = list(itertools.product([reval], prepared_folds, self.nclust_range))
-        elif self.nclust_range is not None and 'n_components' in self.clust_method.get_params().keys():
-            params = list(itertools.product([reval], prepared_folds, self.nclust_range))
-        else:
-            params = list(itertools.product([reval], prepared_folds))
-        
-        if self.n_jobs > 1:
-            p = mp.Pool(processes=self.n_jobs)
-            miscl = list(zip(*p.starmap(self._fit_confounds, params)))
-            p.close()
-            p.join()
-            out = list(zip(*miscl))
-        else:
-            miscl = []
-            for p in params:
-                if len(p) > 2:
-                    miscl.append(self._fit_confounds(reval=p[0],
-                                                     fold=p[1],
-                                                     ncl=p[2]))
-                else:
-                    miscl.append(self._fit_confounds(reval=p[0],
-                                                     fold=p[1]))
-            out = miscl
+                                           self.nfold, iter_cv, strat_vect, self.n_jobs)
+        params = self._make_tasks(reval, prepared_folds)
+        out = _run_tasks(params, self.n_jobs)
+        return self._aggregate_results(params, out)
 
+    def _make_tasks(self, reval, prepared_folds):
+        """
+        Build the list of independent tasks: one for each fold and number of clusters
+        (or one for each fold for clustering methods without a number of clusters).
+
+        :param reval: `neureval.RelativeValidationConfounds` class used by the tasks.
+        :type reval: RelativeValidationConfounds
+        :param prepared_folds: folds prepared with :func:`_prepare_folds`.
+        :type prepared_folds: list
+        :return: list of tasks, each a tuple (reval, fold) or (reval, fold, number of clusters).
+        :rtype: list
+        """
+        if self.nclust_range is not None and 'n_clusters' in self.clust_method.get_params().keys():
+            return list(itertools.product([reval], prepared_folds, self.nclust_range))
+        elif self.nclust_range is not None and 'n_components' in self.clust_method.get_params().keys():
+            return list(itertools.product([reval], prepared_folds, self.nclust_range))
+        else:
+            return list(itertools.product([reval], prepared_folds))
+
+    def _aggregate_results(self, params, out):
+        """
+        Combine the results of the tasks into CV metrics, best number of clusters and labels.
+
+        :param params: tasks, as returned by :meth:`_make_tasks`.
+        :type params: list
+        :param out: results of the tasks, in the same order as `params`.
+        :type out: list
+        :return: CV metrics, best number of clusters, clustering labels; None if no
+            clusters were found.
+        :rtype: dictionary, int, list
+        """
         # return dataframe attribute (cv_results_) with cv scores
         # If no point are labeled (e.g., all points assigned to -1 class by HDBSCAN)
         # the method returns
@@ -213,60 +253,102 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
     
     def evaluate_confounds(self, data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None):
         """
-        Method that applies the selected clustering algorithm with the best number of clusters
-        to the test set. It returns clustering labels.
-    
-        :param data: dataset.
-        :type data: ndarray, (n_samples, n_features)
+        External validation: tests whether the clustering solution found in the training
+        set replicates in a validation (hold-out or external) set.
+
+        Covariates are regressed out and preprocessing (if any) is fitted on the training
+        set only, then applied to the validation set. A classifier is trained on the
+        training clusters; the validation set is clustered independently and the two
+        labelings are compared.
+
+        :param data: dataset with both training and validation subjects.
+        :type data: ndarray or DataFrame, (n_samples, n_features)
         :param modalities: dictionary specifying the datasets for each type of input feature
         :type modalities: dictionary
         :param covariates: dictionary specifying the covariates for each type of input feature
         :type covariates: dictionary
-        :param tr_idx: index specifying the training dataset
+        :param tr_idx: training subjects, as integer row positions (in any order) or as a
+            boolean mask with one value per subject.
         :type tr_idx: array-like
-        :param val_idx: index specifying the validation dataset
+        :param val_idx: validation subjects, as integer row positions or as a boolean mask.
+            Must not overlap with `tr_idx`.
         :type val_idx: array-like
-        :param nclust: best number of clusters, default None.
+        :param nclust: number of clusters. Required for clustering methods with an
+            `n_clusters` or `n_components` parameter. Default None.
         :type nclust: int
-        :param tr_lab: clustering labels for the training set. If not None
-            the clustering algorithm is not performed and the classifier is fitted.
-            Available for clustering methods without `n_clusters` parameter. Default None.
+        :param tr_lab: clustering labels for the training set. If not None the clustering
+            algorithm is not run on the training set and the classifier is fitted on these
+            labels (e.g. for methods without `n_clusters`, using the labels found during
+            cross-validation). Default None.
         :type tr_lab: array-like
-        :return: labels and accuracy for both training and test sets.
-        :rtype: namedtuple, (train_cllab: array, train_acc:float, test_cllab:array, test_acc:float)
+        :return: namedtuple with fields
+
+            - train_cllab: clustering labels of the training subjects;
+            - train_acc: accuracy of the classifier on the training set;
+            - test_cllab: labels of the independent clustering of the validation set,
+              matched to the training clusters;
+            - test_acc: agreement between `test_cllab` and the classifier predictions
+              (raw accuracy, its chance level depends on the number of clusters);
+            - test_classlab: training cluster assigned by the classifier to each
+              validation subject. Use these labels to assign new subjects to the
+              training clusters;
+            - test_stability: normalized stability on the validation set, i.e.
+              (1 - test_acc) divided by the error obtained with random training labels,
+              as in cross-validation: 0 means perfect replication, values close to 1
+              mean no better than chance.
+
+            Returns None if the clustering algorithm finds no clusters.
+        :rtype: namedtuple
         """
-      
-        if isinstance(tr_lab, list):
-            tr_lab = np.array(tr_lab)
-        try:
-            if 'n_clusters' in self.clust_method.get_params().keys():
-                self.clust_method.n_clusters = nclust
-                train_cor_dic, test_cor_dic = super().GLMcorrection_confounds(modalities,covariates, tr_idx, val_idx)
-                tr_misc, modelfit, labels_tr, X_train_cor = super().train(train_cor_dic, tr_lab)
-            elif 'n_components' in self.clust_method.get_params().keys():
-                self.clust_method.n_components = nclust
-                train_cor_dic, test_cor_dic = super().GLMcorrection_confounds(modalities,covariates, tr_idx, val_idx)
-                tr_misc, modelfit, labels_tr, X_train_cor = super().train(train_cor_dic, tr_lab)
-            else:
-                train_cor_dic, test_cor_dic = super().GLMcorrection_confounds(modalities, covariates, tr_idx, val_idx)
-                tr_misc, modelfit, labels_tr, X_train_cor = super().train(train_cor_dic, tr_lab)
-            
-            if self.preproc_method is not None:
-                ts_misc, labels_ts, X_test_cor = super().test(test_cor_dic, modelfit, fit_preproc=self.preproc_method)
-            else:
-                ts_misc, labels_ts, X_test_cor = super().test(test_cor_dic, modelfit)
-        except TypeError:
-            logging.info(f"Not possible to perform evaluation on the test set. "
-                         f"No clusters were identified with "
-                         f"{self.clust_method}")
+        n_samples = _n_subjects(modalities, covariates)
+        tr_idx = _check_indices(tr_idx, n_samples, 'tr_idx')
+        val_idx = _check_indices(val_idx, n_samples, 'val_idx')
+        overlap = np.intersect1d(tr_idx, val_idx)
+        if len(overlap) > 0:
+            raise ValueError(f"{len(overlap)} subject(s) are in both the training and the validation set "
+                             f"(row positions {overlap[:10].tolist()}{'...' if len(overlap) > 10 else ''}). "
+                             f"The two sets must not overlap.")
+        if tr_lab is not None:
+            tr_lab = np.asarray(tr_lab)
+            if len(tr_lab) != len(tr_idx):
+                raise ValueError(f"tr_lab has {len(tr_lab)} labels but the training set has "
+                                 f"{len(tr_idx)} subjects.")
+
+        # Work on copies of the estimators, so that the objects passed by the user are not modified
+        clust_method = clone(self.clust_method)
+        clust_params = clust_method.get_params()
+        for par in ('n_clusters', 'n_components'):
+            if par in clust_params:
+                if nclust is None:
+                    raise ValueError(f"nclust is required for {type(clust_method).__name__}, "
+                                     f"which needs the number of clusters ({par}).")
+                clust_method.set_params(**{par: nclust})
+                break
+        preproc = clone(self.preproc_method) if self.preproc_method is not None else None
+        reval = RelativeValidationConfounds(clust_method, clone(self.class_method), preproc, self.nrand)
+
+        X_train_prep, X_test_prep = reval._prepare_fold(modalities, covariates, tr_idx, val_idx)
+        train_res = reval._cluster_and_classify_train(X_train_prep, tr_lab)
+        if train_res is None:
+            logging.warning(f"Evaluation not possible: no clusters were identified in the training set "
+                            f"with {clust_method}.")
             return None
+        tr_misc, modelfit, labels_tr, X_train_cor = train_res
+        test_res = reval._cluster_and_classify_test(X_test_prep, modelfit)
+        if test_res is None:
+            logging.warning(f"Evaluation not possible: no clusters were identified in the validation set "
+                            f"with {clust_method}.")
+            return None
+        ts_misc, labels_ts, X_test_cor = test_res
+        classlab_ts = modelfit.predict(X_test_cor)
 
-        Eval = namedtuple('Eval',
-                      ['train_cllab', 'train_acc', 'test_cllab', 'test_acc'])
-        out = Eval(labels_tr, 1 - tr_misc,  labels_ts, 1 - ts_misc)
-        return out
+        # Normalize by the error obtained with random training labels, as in cross-validation
+        rnd_misc = reval.rndlabels_traineval(X_train_cor, X_test_cor, labels_tr, labels_ts)
+        test_stability = ts_misc / rnd_misc if rnd_misc > 0.0 else 1.0
 
-
+        Eval = namedtuple('Eval', ['train_cllab', 'train_acc', 'test_cllab', 'test_acc',
+                                   'test_classlab', 'test_stability'])
+        return Eval(labels_tr, 1 - tr_misc, labels_ts, 1 - ts_misc, classlab_ts, test_stability)
 
     @staticmethod
     def _fit_confounds(reval, fold, ncl=None):
@@ -292,24 +374,97 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
            reval.clust_method.n_components = ncl
    
         
-        # Case in which the number of clusters identified is not sufficient or points are not classified
-        # (it happens particularly for SpectralClustering and HDBSCAN)
-        try:
-            miscl_tr, modelfit, tr_labels, X_train_cor = reval._cluster_and_classify_train(X_train_prep)
-            miscl_val, val_labels, X_test_cor = reval._cluster_and_classify_test(X_test_prep, modelfit)
-            rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
-               
-            # If random labeling gives perfect prediction, substitute
-            # misclassification for validation loop with 1.0
-            if rndmisc_mean_val > 0.0:
-                ms_val = miscl_val / rndmisc_mean_val
-            else:
-                ms_val = 1.0
-            return len([n for n in np.unique(val_labels) if n >= 0]), miscl_tr, ms_val, tr_labels, val_labels
-        except TypeError:
+        # Case in which no clusters are identified (all points labeled as noise,
+        # it happens particularly for SpectralClustering and HDBSCAN): no result for this fold.
+        # Other errors are not hidden.
+        train_res = reval._cluster_and_classify_train(X_train_prep)
+        if train_res is None:
             return None, None, None, None, None
+        miscl_tr, modelfit, tr_labels, X_train_cor = train_res
+        test_res = reval._cluster_and_classify_test(X_test_prep, modelfit)
+        if test_res is None:
+            return None, None, None, None, None
+        miscl_val, val_labels, X_test_cor = test_res
+        rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
+
+        # If random labeling gives perfect prediction, substitute
+        # misclassification for validation loop with 1.0
+        if rndmisc_mean_val > 0.0:
+            ms_val = miscl_val / rndmisc_mean_val
+        else:
+            ms_val = 1.0
+        return len([n for n in np.unique(val_labels) if n >= 0]), miscl_tr, ms_val, tr_labels, val_labels
 
         
+def _n_subjects(modalities, covariates):
+    """
+    Number of subjects, checking that all modalities and covariates have the same
+    number of rows.
+    """
+    sizes = {f'modalities[{k!r}]': len(v) for k, v in modalities.items()}
+    sizes.update({f'covariates[{k!r}]': len(v) for k, v in covariates.items()})
+    if len(set(sizes.values())) != 1:
+        raise ValueError(f"Modalities and covariates must have the same number of subjects (rows), "
+                         f"found: {sizes}")
+    return next(iter(sizes.values()))
+
+
+def _check_indices(idx, n_samples, name):
+    """
+    Convert training/validation subjects, given as integer row positions or as a
+    boolean mask, to an array of row positions, checking that they are valid.
+    """
+    idx = np.asarray(idx)
+    if idx.size == 0:
+        raise ValueError(f"{name} is empty.")
+    if idx.dtype == bool:
+        if idx.ndim != 1 or len(idx) != n_samples:
+            raise ValueError(f"{name} is a boolean mask of length {len(idx)}, but there are "
+                             f"{n_samples} subjects.")
+        return np.flatnonzero(idx)
+    if idx.ndim != 1 or not np.issubdtype(idx.dtype, np.integer):
+        raise ValueError(f"{name} must be a list of integer row positions or a boolean mask.")
+    if idx.min() < 0 or idx.max() >= n_samples:
+        raise ValueError(f"{name} contains row positions outside the range 0-{n_samples - 1}.")
+    if len(np.unique(idx)) != len(idx):
+        raise ValueError(f"{name} contains duplicated row positions.")
+    return idx
+
+
+def _check_n_jobs(n_jobs):
+    """
+    Number of parallel processes to use, following the joblib convention for
+    negative values (-1: all CPUs, -2: all CPUs but one). Values larger than the
+    number of CPUs are capped, 0 or None mean 1.
+    """
+    if n_jobs is None or n_jobs == 0:
+        return 1
+    return max(1, min(effective_n_jobs(n_jobs), mp.cpu_count()))
+
+
+def _run_tasks(tasks, n_jobs):
+    """
+    Run :meth:`FindBestClustCVConfounds._fit_confounds` on each task, in parallel
+    with joblib when n_jobs > 1, otherwise sequentially in the current process.
+
+    joblib starts its worker processes in a way that is safe with libraries using
+    OpenMP threads (e.g. UMAP, numba, scikit-learn), works the same way on Linux,
+    macOS and Windows, raises an error if a worker dies instead of waiting forever,
+    and limits the threads used by each worker to avoid oversubscribing the CPUs.
+
+    :param tasks: tasks, as returned by :meth:`FindBestClustCVConfounds._make_tasks`.
+    :type tasks: list
+    :param n_jobs: number of parallel processes.
+    :type n_jobs: int
+    :return: results of the tasks, in the same order as `tasks`.
+    :rtype: list
+    """
+    if n_jobs > 1 and len(tasks) > 1:
+        return Parallel(n_jobs=n_jobs)(delayed(FindBestClustCVConfounds._fit_confounds)(*t)
+                                       for t in tasks)
+    return [FindBestClustCVConfounds._fit_confounds(*t) for t in tasks]
+
+
 def _confint(vect):
     """
     Private function to compute confidence interval.
