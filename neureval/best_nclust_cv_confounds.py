@@ -202,9 +202,9 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         # If no point are labeled (e.g., all points assigned to -1 class by HDBSCAN)
         # the method returns
         cv_results_ = pd.DataFrame(out,
-                                   columns=['ncl', 'ms_tr', 'ms_val', 'tr_labels', 'val_labels'])
+                                   columns=['ncl', 'ms_tr', 'ms_val', 'tr_labels', 'val_labels', 'val_classlab'])
         ctrl_rows = cv_results_.shape[0]
-        cv_results_.dropna(axis=0, inplace=True)
+        cv_results_ = cv_results_.dropna(axis=0)
         if 0 < ctrl_rows - cv_results_.shape[0] < ctrl_rows:
             logging.info("Dropped results where clustering algorithm failed to identify clusters.")
             FindBestClustCVConfounds.cv_results_ = cv_results_
@@ -232,7 +232,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             # To comment
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
             idx_vect = np.concatenate((params[best_idx][1][0], params[best_idx][1][1]))
-            label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
+            label_vect = np.concatenate((out[best_idx][3], out[best_idx][4]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
         elif self.nclust_range is not None and 'n_components' in self.clust_method.get_params().keys():
@@ -240,14 +240,14 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             # To comment
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
             idx_vect = np.concatenate((params[best_idx][1][0], params[best_idx][1][1]))
-            label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
+            label_vect = np.concatenate((out[best_idx][3], out[best_idx][4]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
         else:
             bestncl = list(metrics['val'].keys())[np.flatnonzero(val_score == bestscore)[-1]]
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
             idx_vect = np.concatenate((params[best_idx][1][0], params[best_idx][1][1]))
-            label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
+            label_vect = np.concatenate((out[best_idx][3], out[best_idx][4]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
     
@@ -363,8 +363,10 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         :type fold: tuple
         :param ncl: number of clusters, default None
         :type ncl: int
-        :return: number of clusters and misclassification errors for training and validation.
-        :rtype: tuple (int, float, float)
+        :return: number of clusters, misclassification error on the training set, normalized
+            stability on the validation set, clustering labels of the training and validation sets
+            (the latter matched to the classifier labels), classifier predictions on the validation set.
+        :rtype: tuple
         """
 
         tr_idx, val_idx, X_train_prep, X_test_prep = fold
@@ -379,12 +381,15 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         # Other errors are not hidden.
         train_res = reval._cluster_and_classify_train(X_train_prep)
         if train_res is None:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         miscl_tr, modelfit, tr_labels, X_train_cor = train_res
         test_res = reval._cluster_and_classify_test(X_test_prep, modelfit)
         if test_res is None:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         miscl_val, val_labels, X_test_cor = test_res
+        # Classifier predictions on the validation set, needed for the agreement metrics
+        # (computed before random labeling, which refits the same classifier on random labels)
+        val_classlab = modelfit.predict(X_test_cor)
         rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
 
         # If random labeling gives perfect prediction, substitute
@@ -393,7 +398,8 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             ms_val = miscl_val / rndmisc_mean_val
         else:
             ms_val = 1.0
-        return len([n for n in np.unique(val_labels) if n >= 0]), miscl_tr, ms_val, tr_labels, val_labels
+        return (len([n for n in np.unique(val_labels) if n >= 0]), miscl_tr, ms_val, tr_labels, val_labels,
+                val_classlab)
 
         
 def _n_subjects(modalities, covariates):

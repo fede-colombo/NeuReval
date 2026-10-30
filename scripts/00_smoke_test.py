@@ -25,6 +25,7 @@ from sklearn.svm import SVC
 from neureval.param_selection_confounds import ParamSelectionConfounds
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.utils import load_table
+from neureval.metrics import agreement_metrics, cv_agreement_metrics
 
 
 def main():
@@ -127,6 +128,12 @@ def main():
     print(f'Best number of clusters: {bestncl} (expected 3), '
           f'normalized stability {metrics["val"][bestncl][0]:.3f}')
     print(f'Agreement with the true clusters (ARI): {ari:.3f} (1 = perfect, 0 = chance)')
+    _, cv_summary = cv_agreement_metrics(findbestclust.cv_results_)
+    best = cv_summary.loc[cv_summary.ncl == bestncl].iloc[0]
+    print(f'Cross-validation metrics for {bestncl} clusters (mean across folds): '
+          f'accuracy {best.accuracy_mean:.3f}, balanced accuracy {best.balanced_accuracy_mean:.3f}, '
+          f'kappa {best.cohen_kappa_mean:.3f}, ARI {best.ARI_mean:.3f}, '
+          f'majority class baseline {best.majority_class_baseline_mean:.3f}')
 
     # 4. External validation: 200 training and 100 hold-out subjects, identified by
     # their IDs as in section 3 of 02_run_findbestclustcv.py
@@ -140,10 +147,17 @@ def main():
           f'normalized stability {out.test_stability:.3f} (expected below 1, i.e. better than chance), '
           f'{len(out.test_classlab)} hold-out subjects assigned (expected 100)')
 
+    val_metrics, _ = agreement_metrics(out.test_cllab, out.test_classlab)
+    print(f'External validation metrics: balanced accuracy {val_metrics["balanced_accuracy"]:.3f}, '
+          f'kappa {val_metrics["cohen_kappa"]:.3f}, ARI {val_metrics["ARI"]:.3f}, '
+          f'majority class baseline {val_metrics["majority_class_baseline"]:.3f}')
+
     checks = {'number of clusters': bestncl == 3,
               'agreement with the true clusters': ari > 0.5,
               'replication in the hold-out set': out.test_stability < 1.0,
-              'labels for every hold-out subject': len(out.test_classlab) == val_idx.sum()}
+              'labels for every hold-out subject': len(out.test_classlab) == val_idx.sum(),
+              'metrics consistent with NeuReval accuracy': abs(val_metrics['accuracy'] - out.test_acc) < 1e-9,
+              'per-fold metrics for every number of clusters': len(cv_summary) == 3}
     failed = [name for name, ok in checks.items() if not ok]
     print('SMOKE TEST PASSED' if not failed else f'WARNING: unexpected {", ".join(failed)}')
 

@@ -8,3 +8,7 @@ pandas
 pytest
 hdbscan
 openpyxl
+joblib
+tqdm
+seaborn
+statsmodels

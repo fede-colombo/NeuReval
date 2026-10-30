@@ -80,7 +80,8 @@ def _findbest(c, s, preprocessing, nclust_range):
                                   nrand=5, n_jobs=1, nclust_range=nclust_range)
     metrics, bestncl, tr_lab = fb.best_nclust_confounds(data, modalities, covariates,
                                                         iter_cv=2, strat_vect=None)
-    cv = FindBestClustCVConfounds.cv_results_
+    # Columns available before version 1.2.0 (later versions add columns, e.g. val_classlab)
+    cv = FindBestClustCVConfounds.cv_results_[['ncl', 'ms_tr', 'ms_val', 'tr_labels', 'val_labels']]
     return to_plain({'metrics': metrics,
                      'bestncl': bestncl,
                      'tr_lab': tr_lab,

@@ -26,6 +26,7 @@ import os
 import pickle as pkl
 import logging
 from neureval.utils import load_table
+from neureval.metrics import cv_agreement_metrics
 
 # Define working directories and specify the folder 'models'
 main_path = 'path/to/working/directory'
@@ -88,20 +89,32 @@ val_results = list(metrics['val'].values())
 val_results = np.array(val_results, dtype=object)
 
 print(f"Best number of clusters: {bestncl}")
-print(f"Validation set normalized stability (misclassification): {metrics['val'][bestncl]}")
-print(f"Result accuracy (on test set): "
-      f"{1-val_results[0,0]}")
-
+stab_mean, (_, stab_ci) = metrics['val'][bestncl]
+print(f"Validation set normalized stability: {stab_mean:.3f} +/- {stab_ci:.3f} (mean +/- half-width of the 95% CI)")
+ 
+# Agreement metrics in each cross-validation fold, between the clustering labels of the
+# validation fold and the predictions of the classifier trained on the training fold:
+# accuracy, balanced accuracy, Cohen's kappa, ARI, NMI, AMI and majority class baseline.
+# cv_per_fold: one row per fold and number of clusters
+# cv_summary: mean and standard deviation across folds, for each number of clusters
+cv_per_fold, cv_summary = cv_agreement_metrics(findbestclust.cv_results_)
+print(f"Agreement metrics across folds for {bestncl} clusters (mean and SD):")
+print(cv_summary.loc[cv_summary.ncl == bestncl].T.to_string(header=False))
+# Change the .csv file names according to your model
+cv_per_fold.to_csv('CV_metrics_per_fold_model_name.csv', index=False)
+cv_summary.to_csv('CV_metrics_summary_model_name.csv', index=False)
+ 
 # Normalized stability plot. For each number of clusters, normalized stabilities are represented for both training (dashed line) and validation sets (continuous line).
 # Colors for training and validation sets can be changed (default: ('black', 'black')).
 # To save the plot, specify the file name for saving figure in png format.
 plot = plot_metrics(metrics, color=('black', 'black'), save_fig='plot_model_name.png')
-
+ 
 # Save dataset with clustering labels for post-hoc analyses
 labels_tr = pd.DataFrame(tr_lab, columns=['Labels'])
 data_all_tr = pd.concat([data, labels_tr], axis=1)
 # Change the .csv file name according to your model
 data_all_tr.to_csv('Labels_model_name_training.csv', index=False)
+
 
 
 
@@ -214,6 +227,7 @@ from sklearn.mixture import GaussianMixture
 from umap import UMAP
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.utils import load_table
+from neureval.metrics import agreement_metrics
 
 # Define working directories and specify the folder 'models'
 main_path = 'path/to/working/directory'
@@ -297,6 +311,20 @@ print(f"Training ACC: {out.train_acc:.3f}")
 print(f"Hold-out ACC (raw, chance level depends on the number of clusters): {out.test_acc:.3f}")
 print(f"Hold-out normalized stability: {out.test_stability:.3f} "
       f"(0 = perfect replication, close to 1 = no better than chance)")
+
+# Agreement metrics between the clustering labels of the hold-out set (reference) and the
+# predictions of the classifier trained on the training set: accuracy, balanced accuracy,
+# Cohen's kappa, ARI, NMI, AMI, majority class baseline and cluster sizes, plus the confusion matrix
+val_metrics, val_cm = agreement_metrics(out.test_cllab, out.test_classlab)
+val_metrics = {'normalized_stability': out.test_stability, **val_metrics}
+for name, value in val_metrics.items():
+    print(f"{name:>24} = {value:.3f}" if isinstance(value, float) else f"{name:>24} = {value}")
+print("Confusion matrix (rows = hold-out clustering, columns = classifier predictions):")
+print(val_cm)
+
+# Change the .csv file names according to your model
+pd.DataFrame.from_dict(val_metrics, orient='index', columns=['value']).to_csv('Val_metrics_summary_model_name.csv')
+val_cm.to_csv('Val_confusion_matrix_model_name.csv')
 
 # Save the labels of the hold-out subjects:
 # - Holdout_clustering_labels: independent clustering of the hold-out set, matched to the training clusters
