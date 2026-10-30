@@ -5,7 +5,7 @@
 """
 
 from neureval.relative_validation_confounds import RelativeValidationConfounds
-from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
+from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds, _prepare_folds
 from sklearn.model_selection import ParameterGrid
 import multiprocessing as mp
 import logging
@@ -84,14 +84,29 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         :param nclass: number of true classes, default None.
         :type nclass: int
         """
+        # Confound correction and preprocessing do not depend on the clustering and
+        # classifier parameters: prepare the cross-validation folds once (once for each
+        # combination of preprocessing parameters) and share them across the grid.
         if self.preproc_method is not None:
             grid = {'c': ParameterGrid(self.params['c']), 's': ParameterGrid(self.params['s']), 'preprocessing': ParameterGrid(self.params['preprocessing'])}
-            new_grid = list(itertools.product(grid['c'], grid['s'], grid['preprocessing']))
-            new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1], ng[2]) for ng in new_grid if self._allowed_par(ng[0])]
+            preproc_grid = list(grid['preprocessing'])
+            folds_by_preproc = []
+            for param_preproc in preproc_grid:
+                self.preproc_method.set_params(**param_preproc)
+                reval = RelativeValidationConfounds(self.clust_method, self.class_method,
+                                                    self.preproc_method, self.nrand)
+                folds_by_preproc.append(_prepare_folds(reval, data_tr, mod_tr, cov_tr,
+                                                      self.cv, self.iter_cv, self.strat))
+            new_grid = list(itertools.product(grid['c'], grid['s'], preproc_grid))
+            new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1], ng[2],
+                           folds_by_preproc[preproc_grid.index(ng[2])])
+                          for ng in new_grid if self._allowed_par(ng[0])]
         else:
             grid = {'c': ParameterGrid(self.params['c']), 's': ParameterGrid(self.params['s'])}
+            reval = RelativeValidationConfounds(self.clust_method, self.class_method, None, self.nrand)
+            folds = _prepare_folds(reval, data_tr, mod_tr, cov_tr, self.cv, self.iter_cv, self.strat)
             new_grid = list(itertools.product(grid['c'], grid['s']))
-            new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1]) for ng in new_grid if self._allowed_par(ng[0])]
+            new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1], folds) for ng in new_grid if self._allowed_par(ng[0])]
 
         if len(new_grid) != len(new_params):
             logging.info(f"Dropped {len(new_grid) - len(new_params)} out of {len(new_grid)} parameter "
@@ -201,7 +216,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         return self
      
 
-    def _run_gridsearchcv(self, data, modalities, covariates, param_c, param_s):
+    def _run_gridsearchcv(self, data, modalities, covariates, param_c, param_s, prepared_folds=None):
         """
         Private method that initializes classifier/clustering/preprocessing with different
         parameter combinations and :class:`neureval.best_nclust_cv_confounds.FindBestClustCVConfounds`.
@@ -216,6 +231,9 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         :type param_c: dictionary
         :param param_c: dictionary of clustering parameters.
         :type param_c: dictionary
+        :param prepared_folds: folds prepared once with
+            :func:`neureval.best_nclust_cv_confounds._prepare_folds`, default None.
+        :type prepared_folds: list
         :return: performance list.
         :rtype: list
         """
@@ -230,11 +248,13 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
                                              nclust_range=self.clust_range)
                                              
         if self.clust_range is not None:
-                metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat)
+                metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
+                                                                        prepared_folds=prepared_folds)
                 #tr_lab = None
         else:
                 try:
-                    metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat)
+                    metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
+                                                                        prepared_folds=prepared_folds)
                 except TypeError:
                     perf =  [(key, val) for key, val in param_c.items()] + \
                             [(key, val) for key, val in param_s.items()] + \
@@ -265,7 +285,8 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
                     ]
         return perf
         
-    def _run_gridsearchcv_preproc(self, data, modalities, covariates, param_c, param_s, param_preproc):
+    def _run_gridsearchcv_preproc(self, data, modalities, covariates, param_c, param_s, param_preproc,
+                                  prepared_folds=None):
         """
         Private method that initializes classifier/clustering/preprocessing with different
         parameter combinations and :class:`neureval.best_nclust_cv_confounds.FindBestClustCVConfounds`.
@@ -282,6 +303,10 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         :type param_c: dictionary
         :param param_preproc: dictionary of preprocessing parameters.
         :type param_preproc: dictionary
+        :param prepared_folds: folds prepared once with
+            :func:`neureval.best_nclust_cv_confounds._prepare_folds` using these
+            preprocessing parameters, default None.
+        :type prepared_folds: list
         :return: performance list.
         :rtype: list
         """
@@ -297,11 +322,13 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
                                              nclust_range=self.clust_range)
                                              
         if self.clust_range is not None:
-                metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat)
+                metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
+                                                                        prepared_folds=prepared_folds)
                 #tr_lab = None
         else:
                 try:
-                    metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat)
+                    metric, nclbest, tr_lab = findclust.best_nclust_confounds(data, modalities, covariates, iter_cv=self.iter_cv, strat_vect=self.strat,
+                                                                        prepared_folds=prepared_folds)
                 except TypeError:
                     perf =  [(key, val) for key, val in param_c.items()] + \
                             [(key, val) for key, val in param_s.items()] + \

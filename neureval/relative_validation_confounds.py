@@ -105,6 +105,37 @@ class RelativeValidationConfounds:
         
         return train_cor_dic, test_cor_dic
 
+    def _prepare_fold(self, modalities, covariates, tr_idx, val_idx):
+        """
+        Prepare the data of one cross-validation fold for clustering: confound
+        correction, concatenation of the modalities and (if specified) preprocessing,
+        fitted on the training set and applied to both sets.
+
+        These steps depend only on the fold (and on the preprocessing parameters),
+        not on the number of clusters or on the clustering/classifier parameters.
+        Computing them once per fold and reusing the result avoids repeating the
+        same (often expensive, e.g. UMAP) computation many times.
+
+        :param modalities: dictionary specifying the datasets for each type of input features
+        :type modalities: dictionary
+        :param covariates: dictionary specifying the covariates for each type of input features
+        :type covariates: dictionary
+        :param tr_idx: index specifying the training dataset
+        :type tr_idx: array
+        :param val_idx: index specifying the validation dataset
+        :type val_idx: array
+        :return: training and validation datasets ready for clustering.
+        :rtype: ndarray, ndarray
+        """
+        train_cor_dic, test_cor_dic = self.GLMcorrection_confounds(modalities, covariates, tr_idx, val_idx)
+        X_train_cor = np.concatenate([np.array(train_cor_dic[mod]) for mod in train_cor_dic], axis=1)
+        X_test_cor = np.concatenate([np.array(test_cor_dic[mod]) for mod in test_cor_dic], axis=1)
+        if self.preproc_method is not None:
+            fitpreproc_tr = self.preproc_method.fit(X_train_cor)
+            X_train_cor = fitpreproc_tr.transform(X_train_cor)
+            X_test_cor = self.preproc_method.transform(X_test_cor)
+        return X_train_cor, X_test_cor
+
     def train(self, train_cor_dic, tr_lab=None):
         """
         Method that performs training. It compares the clustering labels on training set
@@ -127,9 +158,21 @@ class RelativeValidationConfounds:
         if self.preproc_method is not None:
             fitpreproc_tr = self.preproc_method.fit(X_train_cor)
             X_train_cor = fitpreproc_tr.transform(X_train_cor)
-        else:
-            X_train_cor = X_train_cor
-        
+        return self._cluster_and_classify_train(X_train_cor, tr_lab)
+
+    def _cluster_and_classify_train(self, X_train_cor, tr_lab=None):
+        """
+        Training step on data already prepared with :meth:`_prepare_fold`
+        (confound corrected and, if specified, preprocessed). See :meth:`train`.
+
+        :param X_train_cor: prepared training dataset.
+        :type X_train_cor: ndarray, (n_samples, n_features)
+        :param tr_lab: cluster labels for the training set. If not None the
+            clustering method is not performed. Default None.
+        :type tr_lab: list
+        :return: misclassification error, fitted supervised model object, clustering labels, training data.
+        :rtype: float, object, ndarray (n_samples,), ndarray
+        """
         if tr_lab is None:
             clustlab_tr = self.clust_method.fit_predict(X_train_cor)  # A_k(X)
         else:
@@ -168,10 +211,21 @@ class RelativeValidationConfounds:
         
         if fit_preproc is not None:
             X_test_cor = self.preproc_method.transform(X_test_cor)
-        else:
-            X_test_cor = X_test_cor
-        
-        clustlab_ts = self.clust_method.fit_predict(X_test_cor)  # A_k(X')
+        return self._cluster_and_classify_test(X_test_cor, fit_model)
+
+    def _cluster_and_classify_test(self, X_test_cor, fit_model):
+        """
+        Test step on data already prepared with :meth:`_prepare_fold`
+        (confound corrected and, if specified, preprocessed). See :meth:`test`.
+
+        :param X_test_cor: prepared validation dataset.
+        :type X_test_cor: ndarray, (n_samples, n_features)
+        :param fit_model: fitted supervised model.
+        :type fit_model: class
+        :return: misclassification error, clustering labels, validation data.
+        :rtype: float, ndarray (n_samples,), ndarray
+        """
+        clustlab_ts =self.clust_method.fit_predict(X_test_cor)  # A_k(X')
         if len([cl for cl in clustlab_ts if cl >= 0]) == 0:
             logging.info(f"No clusters found during testing with {self.clust_method}")
             return None
@@ -226,4 +280,3 @@ class RelativeValidationConfounds:
         pred_lab = self.class_method.predict(xts)
         me_ts = zero_one_loss(pred_lab, kuhn_munkres_algorithm(np.int32(pred_lab), np.int32(labts)))
         return me_ts
-

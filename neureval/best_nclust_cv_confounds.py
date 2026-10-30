@@ -21,6 +21,38 @@ logging.basicConfig(format='%(asctime)s, %(levelname)s %(message)s',
                     level=logging.INFO)
 
 
+def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_vect=None):
+    """
+    Generate the (repeated) cross-validation folds and prepare the data of each
+    fold once (confound correction and, if specified, preprocessing) with
+    :meth:`neureval.relative_validation_confounds.RelativeValidationConfounds._prepare_fold`.
+
+    :param reval: class used to prepare the folds (its preprocessing method is used).
+    :type reval: RelativeValidationConfounds
+    :param data: dataset, used to define the folds.
+    :type data: ndarray or DataFrame, (n_samples, n_features)
+    :param modalities: dictionary specifying the datasets for each type of input features
+    :type modalities: dictionary
+    :param covariates: dictionary specifying the covariates for each type of input features
+    :type covariates: dictionary
+    :param nfold: number of cross-validation folds.
+    :type nfold: int
+    :param iter_cv: number of repeated cross-validation, default 1.
+    :type iter_cv: int
+    :param strat_vect: vector for stratification, default None.
+    :type strat_vect: ndarray, (n_samples,)
+    :return: one tuple (train indices, validation indices, prepared training data,
+        prepared validation data) for each fold.
+    :rtype: list
+    """
+    if strat_vect is not None:
+        kfold = RepeatedStratifiedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
+    else:
+        kfold = RepeatedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
+    return [(tr_idx, val_idx) + reval._prepare_fold(modalities, covariates, tr_idx, val_idx)
+            for tr_idx, val_idx in kfold.split(data, strat_vect)]
+
+
 class FindBestClustCVConfounds(RelativeValidationConfounds):
     """
     Child class of :class:`reval.relative_validation.RelativeValidationConfounds`.
@@ -66,7 +98,8 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             self.n_jobs = abs(n_jobs)
         self.nclust_range = nclust_range
 
-    def best_nclust_confounds(self, data, modalities, covariates, iter_cv=1, strat_vect=None):
+    def best_nclust_confounds(self, data, modalities, covariates, iter_cv=1, strat_vect=None,
+                              prepared_folds=None):
         """
         This method takes as input the training dataset and the
         stratification vector (if available) and performs a
@@ -83,6 +116,11 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         :type iter_cv: integer
         :param strat_vect: vector for stratification, defaults to None.
         :type strat_vect: ndarray, (n_samples,)
+        :param prepared_folds: internal use, default None. Folds already prepared with :func:`_prepare_folds`.
+            Used by :class:`neureval.param_selection_confounds.ParamSelectionConfounds` to
+            prepare the folds once for all parameter combinations. If None, folds are
+            prepared here.
+        :type prepared_folds: list
         :return: CV metrics for training and validation sets, best number of clusters,
             misclassification errors at each CV iteration.
         :rtype: dictionary, int, (list) if n_clusters parameter is not available
@@ -90,19 +128,17 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         
         reval = RelativeValidationConfounds(self.clust_method, self.class_method, self.preproc_method, self.nrand)
 
-        if strat_vect is not None:
-            kfold = RepeatedStratifiedKFold(n_splits=self.nfold, n_repeats=iter_cv, random_state=42)
-        else:
-            kfold = RepeatedKFold(n_splits=self.nfold, n_repeats=iter_cv, random_state=42)
-        fold_gen = kfold.split(data, strat_vect)
+        # Confound correction and preprocessing depend only on the fold:
+        # compute them once per fold and reuse them for every number of clusters.
+        if prepared_folds is None:
+            prepared_folds = _prepare_folds(reval, data, modalities, covariates,
+                                           self.nfold, iter_cv, strat_vect)
         if self.nclust_range is not None and 'n_clusters' in self.clust_method.get_params().keys():
-            params = list(itertools.product([(modalities, reval, covariates)],
-                                            fold_gen, self.nclust_range))
+            params = list(itertools.product([reval], prepared_folds, self.nclust_range))
         elif self.nclust_range is not None and 'n_components' in self.clust_method.get_params().keys():
-            params = list(itertools.product([(modalities, reval, covariates)],
-                                            fold_gen, self.nclust_range))
+            params = list(itertools.product([reval], prepared_folds, self.nclust_range))
         else:
-            params = list(itertools.product([(modalities, reval, covariates)],fold_gen))
+            params = list(itertools.product([reval], prepared_folds))
         
         if self.n_jobs > 1:
             p = mp.Pool(processes=self.n_jobs)
@@ -114,12 +150,12 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             miscl = []
             for p in params:
                 if len(p) > 2:
-                    miscl.append(self._fit_confounds(data_obj=p[0],
-                                                     idxs=p[1],
+                    miscl.append(self._fit_confounds(reval=p[0],
+                                                     fold=p[1],
                                                      ncl=p[2]))
                 else:
-                    miscl.append(self._fit_confounds(data_obj=p[0],
-                                                     idxs=p[1]))
+                    miscl.append(self._fit_confounds(reval=p[0],
+                                                     fold=p[1]))
             out = miscl
 
         # return dataframe attribute (cv_results_) with cv scores
@@ -155,7 +191,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             bestncl = self.nclust_range[np.flatnonzero(val_score == bestscore)[-1]]
             # To comment
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
-            idx_vect = np.concatenate((params[best_idx][1][-2], params[best_idx][1][-1]))
+            idx_vect = np.concatenate((params[best_idx][1][0], params[best_idx][1][1]))
             label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
@@ -163,14 +199,14 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             bestncl = self.nclust_range[np.flatnonzero(val_score == bestscore)[-1]]
             # To comment
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
-            idx_vect = np.concatenate((params[best_idx][1][-2], params[best_idx][1][-1]))
+            idx_vect = np.concatenate((params[best_idx][1][0], params[best_idx][1][1]))
             label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
         else:
             bestncl = list(metrics['val'].keys())[np.flatnonzero(val_score == bestscore)[-1]]
             best_idx = cv_results_.loc[cv_results_.ncl == bestncl].ms_val.idxmin()
-            idx_vect = np.concatenate((params[best_idx][1][-2], params[best_idx][1][-1]))
+            idx_vect = np.concatenate((params[best_idx][1][0], params[best_idx][1][1]))
             label_vect = np.concatenate((out[best_idx][-2], out[best_idx][-1]))
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
@@ -233,24 +269,23 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
 
 
     @staticmethod
-    def _fit_confounds(data_obj, idxs, ncl=None):
+    def _fit_confounds(reval, fold, ncl=None):
         """
-        Function that calls training, test, covariates, and random labeling.
-    
-        :param data_obj: dataset and `reval.RelativeValidationConfounds` class.
-        :type data_obj: tuple
-        :param cov_obj: covariates and diagnosis labels.
-        :type cov_obj: tuple
-        :param idxs: lists of training and validation indices.
-        :type idxs: tuple
+        Function that calls training, test, and random labeling on one prepared fold.
+
+        :param reval: `neureval.RelativeValidationConfounds` class.
+        :type reval: RelativeValidationConfounds
+        :param fold: training indices, validation indices and the corresponding
+            prepared (confound corrected and preprocessed) datasets, as returned by
+            :func:`_prepare_folds`.
+        :type fold: tuple
         :param ncl: number of clusters, default None
         :type ncl: int
         :return: number of clusters and misclassification errors for training and validation.
         :rtype: tuple (int, float, float)
         """
-    
-        modalities, reval, covariates = data_obj
-        tr_idx, val_idx = idxs
+
+        tr_idx, val_idx, X_train_prep, X_test_prep = fold
         if 'n_clusters' in reval.clust_method.get_params().keys():
            reval.clust_method.n_clusters = ncl
         elif 'n_components' in reval.clust_method.get_params().keys():
@@ -260,14 +295,9 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         # Case in which the number of clusters identified is not sufficient or points are not classified
         # (it happens particularly for SpectralClustering and HDBSCAN)
         try:
-            train_cor_dic, test_cor_dic = reval.GLMcorrection_confounds(modalities, covariates, tr_idx, val_idx)
-            miscl_tr, modelfit, tr_labels, X_train_cor = reval.train(train_cor_dic)
-            if reval.preproc_method is not None:
-                miscl_val, val_labels, X_test_cor = reval.test(test_cor_dic, modelfit, fit_preproc=reval.preproc_method)
-                rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
-            else:
-                miscl_val, val_labels, X_test_cor = reval.test(test_cor_dic, modelfit)
-                rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
+            miscl_tr, modelfit, tr_labels, X_train_cor = reval._cluster_and_classify_train(X_train_prep)
+            miscl_val, val_labels, X_test_cor = reval._cluster_and_classify_test(X_test_prep, modelfit)
+            rndmisc_mean_val = reval.rndlabels_traineval(X_train_cor, X_test_cor, tr_labels, val_labels)
                
             # If random labeling gives perfect prediction, substitute
             # misclassification for validation loop with 1.0
