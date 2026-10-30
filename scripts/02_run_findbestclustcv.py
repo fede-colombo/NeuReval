@@ -25,6 +25,7 @@ from sklearn.mixture import GaussianMixture
 import os
 import pickle as pkl
 import logging
+from neureval.utils import load_table
 
 # Define working directories and specify the folder 'models'
 main_path = 'path/to/working/directory'
@@ -40,9 +41,9 @@ os.chdir(out_dir)
 # Import data and covariates files
 data_file = 'database.xlsx'
 cov_file = 'covariates.xlsx'
-# If there are multiple sheets, specify the name of the current sheet 
-data = pd.read_excel(os.path.join(data_path,data_file), sheet_name='sheet_name')
-cov = pd.read_excel(os.path.join(data_path, cov_file), sheet_name='sheet_name')
+# For Excel files with multiple sheets, add sheet_name='sheet_name' (default: first sheet)
+data = load_table(os.path.join(data_path,data_file))
+cov = load_table(os.path.join(data_path, cov_file))
 
 # Check sample sizes of data and covariates files
 if len(data) != len(cov):
@@ -64,6 +65,7 @@ s = SVC(C=1, kernel='rbf', random_state=42)
 c = GaussianMixture(covariance_type='full', random_state=42)
 # Uncomment the following line if you also optimized preprocessing steps
 # preproc = UMAP(n_components=2, n_neighbors=30, min_dist=0.0, random_state=42)
+preproc = None
 
 # Initialize FindBestClustCVConfounds class. It performs (repeated) k-folds cross-validation to select the best number of clusters.
 # Parameters to be specified:
@@ -72,7 +74,7 @@ c = GaussianMixture(covariance_type='full', random_state=42)
 # nrand: number of random labelling iterations, default 10
 # n_jobs: number of jobs to run in parallel, default (number of cpus - 1)
 # clust_range: list with number of clusters, default None
-findbestclust = FindBestClustCVConfounds(c,s, preprocessing=None, nfold=2, nrand=10,  n_jobs=1, nclust_range=list(range(2,4)))
+findbestclust = FindBestClustCVConfounds(c,s, preprocessing=preproc, nfold=2, nrand=10,  n_jobs=1, nclust_range=list(range(2,4)))
 
 # Run FindBestClustCVConfounds. It returns normlaized stability (metrics), best number of clusters (bestncl), and clusters' labels (tr_lab).
 # Parameters to be specified:
@@ -109,8 +111,6 @@ data_all_tr.to_csv('Labels_model_name_training.csv', index=False)
 from sklearn.metrics import adjusted_mutual_info_score, silhouette_score, davies_bouldin_score
 from neureval.internal_baselines_confounds import select_best, select_best_bic_aic
 from neureval.utils import kuhn_munkres_algorithm
-from internal_baselines_confounds import select_best, select_best_bic_aic
-from neureval.utils import kuhn_munkres_algorithm
 
 
 # The code is organized in different sections for each kind of measures (i.e., silhouette score, Davies-Boudin score, AIC and BIC).
@@ -120,7 +120,7 @@ from neureval.utils import kuhn_munkres_algorithm
 # Use select_best to calcluate silhouette score. Specify silhouette_score as int_measure and 'max' as select parameter.
 # It returns silhouette score (sil_score), number of clusters selected (sil_best), and silhouette labels (sil_labels)
 logging.info("Silhouette score based selection")
-sil_score, sil_best, sil_label = select_best(data, modalities, covariates, c, silhouette_score, preprocessing=None, select='max', nclust_range=list(range(2,5)))
+sil_score, sil_best, sil_label = select_best(data, modalities, covariates, c, silhouette_score, preprocessing=preproc, select='max', nclust_range=list(range(2,5)))
 
 logging.info(f"Best number of clusters (and scores): "
              f"{{{sil_best}({sil_score})}}")
@@ -142,7 +142,7 @@ pkl.dump(sil_results, open('./sil_results_model_name.pkl', 'wb'))
 # Use select_best to calcluate Davies-Bouldin score. Specify davies_bouldin_score as int_measure and 'min' as select parameter.
 # It returns davies-bouldin score (db_score), number of clusters selected (db_best), and davies-bouldin labels (db_labels)
 logging.info("Davies-Bouldin score based selection")
-db_score, db_best, db_label = select_best(data,modalities, covariates, c, davies_bouldin_score,preprocessing=None,
+db_score, db_best, db_label = select_best(data,modalities, covariates, c, davies_bouldin_score,preprocessing=preproc,
                                                    select='min', nclust_range=list(range(2,5)))
 
 logging.info(f"Best number of clusters (and scores): "
@@ -165,7 +165,7 @@ pkl.dump(db_results, open('./db_results_model_name.pkl', 'wb'))
 # Calculate AIC score. Specify 'aic' as score parameter.
 # It returns AIC score (aic_score), number of clusters selected (aic_best), and AIC labels (aic_labels)
 logging.info("AIC score based selection")
-aic_score, aic_best, aic_label = select_best_bic_aic(data, modalities, covariates, c, score='aic', preprocessing=None, nclust_range=list(range(2,5)))
+aic_score, aic_best, aic_label = select_best_bic_aic(data, modalities, covariates, c, score='aic', preprocessing=preproc, nclust_range=list(range(2,5)))
 
 logging.info(f"Best number of clusters (and scores): "
               f"{{{aic_best}({aic_score})}}")
@@ -185,7 +185,7 @@ pkl.dump(aic_results, open('./aic_results_model_name.pkl', 'wb'))
 # Calculate BIC score. Specify 'bic' as score parameter.
 # It returns BIC score (bic_score), number of clusters selected (bic_best), and BIC labels (bic_labels)
 logging.info("BIC score based selection")
-bic_score, bic_best, bic_label = select_best_bic_aic(data, modalities, covariates, c, score='bic', preprocessing=None, nclust_range=list(range(2,6)))
+bic_score, bic_best, bic_label = select_best_bic_aic(data, modalities, covariates, c, score='bic', preprocessing=preproc, nclust_range=list(range(2,6)))
 
 logging.info(f"Best number of clusters (and scores): "
               f"{{{bic_best}({bic_score})}}")
@@ -213,9 +213,10 @@ pkl.dump(bic_results, open('./bic_results_model_name.pkl', 'wb'))
 # Import data and covariates files for the complete data and covariates files (training + hold-out sets in the same file)
 data_all_file = 'database_all_name.xlsx'
 cov_all_file = 'covariates_all_name.xlsx'
-# If there are multiple sheets, specify the name of the current sheet 
-data_all = pd.read_excel(os.path.join(data_path,data_all_file), sheet='sheet_name')
-cov_all = pd.read_excel(os.path.join(data_path, cov_all_file), sheet='sheet_name')
+# For Excel files with multiple sheets, add sheet_name='sheet_name' (default: first sheet)
+data_all = load_table(os.path.join(data_path,data_all_file))
+cov_all = load_table(os.path.join(data_path, cov_all_file))
+
 # Specify the number of subjects belonging to the training set
 training_dim = 60
 tr_idx = list(range(0,training_dim))

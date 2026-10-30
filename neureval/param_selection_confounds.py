@@ -84,7 +84,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         :param nclass: number of true classes, default None.
         :type nclass: int
         """
-       	if self.preproc_method is not None:
+        if self.preproc_method is not None:
             grid = {'c': ParameterGrid(self.params['c']), 's': ParameterGrid(self.params['s']), 'preprocessing': ParameterGrid(self.params['preprocessing'])}
             new_grid = list(itertools.product(grid['c'], grid['s'], grid['preprocessing']))
             new_params = [(data_tr, mod_tr, cov_tr, ng[0], ng[1], ng[2]) for ng in new_grid if self._allowed_par(ng[0])]
@@ -101,16 +101,20 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         logging.info(f'Running {len(new_params)} combinations of '
                       f'parameters...\n')
 
-        p = mp.Pool(processes=self.n_jobs)
-        
         if self.preproc_method is not None:
-            out = list(zip(*p.starmap(self._run_gridsearchcv_preproc, new_params))) #new_params
-            p.close()
-            p.join()
+            run_fn = self._run_gridsearchcv_preproc
         else:
-            out = list(zip(*p.starmap(self._run_gridsearchcv, new_params))) #new_params
-            p.close()
-            p.join()
+            run_fn = self._run_gridsearchcv
+
+        # Start worker processes only when parallelism is requested.
+        # With n_jobs=1 everything runs in the current process, so scripts
+        # work without the if __name__ == '__main__' guard (needed by the
+        # 'spawn'/'forkserver' start methods used on Windows, macOS and Python>=3.14).
+        if self.n_jobs > 1:
+            with mp.Pool(processes=self.n_jobs) as p:
+                out = list(zip(*p.starmap(run_fn, new_params)))
+        else:
+            out = list(zip(*[run_fn(*par) for par in new_params]))
 
         # cv_results_
         res_dict = _create_result_table(out)

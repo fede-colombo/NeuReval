@@ -8,6 +8,27 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import matthews_corrcoef, accuracy_score, f1_score, \
     precision_score, recall_score
+import os
+import pandas as pd
+
+
+def load_table(path, sheet_name=0):
+    """
+    Load a CSV or Excel file into a pandas DataFrame.
+
+    :param path: path to a .csv, .xlsx or .xls file.
+    :type path: str
+    :param sheet_name: Excel sheet to read (ignored for CSV files).
+    :type sheet_name: str or int
+    :return: pandas DataFrame
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.csv':
+        return pd.read_csv(path)
+    elif ext in ('.xlsx', '.xls'):
+        return pd.read_excel(path, sheet_name=sheet_name)
+    raise ValueError(f'Unsupported file format: {ext}. Use .csv, .xlsx or .xls')
+
 
 def kuhn_munkres_algorithm(true_lab, pred_lab):
     """
