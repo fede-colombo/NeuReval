@@ -7,3 +7,4 @@ psutil
 pandas
 pytest
 hdbscan
+openpyxl

@@ -20,7 +20,7 @@ import umap
 import os
 import pickle as pkl
 import sys
-from neureval.utils import kuhn_munkres_algorithm
+from neureval.utils import kuhn_munkres_algorithm, load_table
 import logging
 
 
@@ -39,9 +39,9 @@ os.chdir(out_dir)
 # Import data and covariates files
 data_file = 'database_name.xlsx'
 cov_file = 'covariates_name.xlsx'
-# If there are multiple sheets, specify the name of the current sheet 
-data = pd.read_excel(os.path.join(data_path,data_file), sheet_name='sheet_name')
-cov = pd.read_excel(os.path.join(data_path, cov_file), sheet_name='sheet_name')
+# For Excel files with multiple sheets, add sheet_name='sheet_name' (default: first sheet)
+data = load_table(os.path.join(data_path,data_file))
+cov = load_table(os.path.join(data_path, cov_file))
 
 # Check sample sizes of data and covariates files
 if len(data) != len(cov):
@@ -74,6 +74,7 @@ s = SVC(random_state=42)
 
 # If you want to perform dimensionality reduction, uncomment the following line. Change the dimensionality reduction algorithm accordingly (e.g., UMAP, PCA)
 # preproc = umap.UMAP(random_state=42)
+preproc = None
 
 # Parameters selection
 best_model = ParamSelectionConfounds(params, 
