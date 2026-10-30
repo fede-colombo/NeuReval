@@ -1,21 +1,13 @@
 """
-Regression cases for NeuReval.
+Reference cases for NeuReval.
 
 Each case runs part of the NeuReval pipeline on synthetic data with fixed
 random seeds and returns its results as plain Python objects (lists, floats,
 ints, strings), so they can be stored in a JSON file and compared later.
 
-The reference results are created once with generate_reference_baseline.py,
-on the code BEFORE a refactoring. test_reference.py then checks that the
+The reference results are created once with save_reference_results.py,
+on the code BEFORE a refactoring. test_reference_results.py then checks that the
 current code still produces the same results.
-
-Five cases are included, covering the main functionalities of NeuReval:
-1. findbest_gmm: clustering with GaussianMixture, no preprocessing.
-2. findbest_kmeans_pca: clustering with KMeans and PCA preprocessing.
-3. findbest_hdbscan: clustering with HDBSCAN, no number of clusters.
-4. paramselection: grid search over classifier and clustering parameters.
-5. paramselection_pca: grid search including preprocessing parameters (PCA).
-
 """
 import numpy as np
 import pandas as pd
@@ -32,7 +24,7 @@ from neureval.param_selection_confounds import ParamSelectionConfounds
 # ---------------------------------------------------------------------------
 # Synthetic data
 # ---------------------------------------------------------------------------
-def make_synthetic_data(n=120, seed=0):
+def make_synthetic_data(n=120, seed=0, cluster_std=4.0):
     """
     3 known clusters, 2 modalities (20 + 15 features) and 3 covariates
     (age, sex, TIV) that have a real effect on the features, so that the
@@ -40,7 +32,7 @@ def make_synthetic_data(n=120, seed=0):
     """
     rng = np.random.default_rng(seed)
     X, y = make_blobs(n_samples=n, n_features=35, centers=3,
-                      cluster_std=4.0, random_state=seed)
+                      cluster_std=cluster_std, random_state=seed)
     age = rng.normal(40, 10, n)
     sex = rng.integers(0, 2, n).astype(float)
     tiv = rng.normal(1500, 100, n)
@@ -88,7 +80,8 @@ def _findbest(c, s, preprocessing, nclust_range):
                                   nrand=5, n_jobs=1, nclust_range=nclust_range)
     metrics, bestncl, tr_lab = fb.best_nclust_confounds(data, modalities, covariates,
                                                         iter_cv=2, strat_vect=None)
-    cv = FindBestClustCVConfounds.cv_results_
+    # Columns available before version 1.2.0 (later versions add columns, e.g. val_classlab)
+    cv = FindBestClustCVConfounds.cv_results_[['ncl', 'ms_tr', 'ms_val', 'tr_labels', 'val_labels']]
     return to_plain({'metrics': metrics,
                      'bestncl': bestncl,
                      'tr_lab': tr_lab,
@@ -139,10 +132,40 @@ def case_paramselection_pca():
     return _paramselection(params, PCA(random_state=42))
 
 
+def _evaluate(c, s, preprocessing, nclust):
+    """
+    External validation with evaluate_confounds: 80 training and 40 validation
+    subjects, chosen at random (not the first/last rows) to also check that
+    indices in any order are handled correctly.
+    Only the outputs that existed before version 1.2.0 are compared.
+    """
+    data, modalities, covariates = make_synthetic_data(cluster_std=10.0)
+    order = np.random.default_rng(7).permutation(len(data))
+    tr_idx, val_idx = np.sort(order[:80]), np.sort(order[80:])
+    fb = FindBestClustCVConfounds(c, s, preprocessing=preprocessing, nfold=2,
+                                  nrand=5, n_jobs=1, nclust_range=list(range(2, 6)))
+    out = fb.evaluate_confounds(data, modalities, covariates, tr_idx, val_idx, nclust=nclust)
+    return to_plain({'train_cllab': out.train_cllab, 'train_acc': out.train_acc,
+                     'test_cllab': out.test_cllab, 'test_acc': out.test_acc})
+
+
+def case_evaluate_gmm():
+    """External validation, clustering with n_components (GaussianMixture)."""
+    return _evaluate(GaussianMixture(random_state=42), SVC(random_state=42), None, 3)
+
+
+def case_evaluate_kmeans_pca():
+    """External validation, clustering with n_clusters (KMeans) and PCA preprocessing."""
+    return _evaluate(KMeans(n_init=10, random_state=42), SVC(random_state=42),
+                     PCA(n_components=5, random_state=42), 3)
+
+
 CASES = {
     'findbest_gmm': case_findbest_gmm,
     'findbest_kmeans_pca': case_findbest_kmeans_pca,
     'findbest_hdbscan': case_findbest_hdbscan,
     'paramselection': case_paramselection,
     'paramselection_pca': case_paramselection_pca,
+    'evaluate_gmm': case_evaluate_gmm,
+    'evaluate_kmeans_pca': case_evaluate_kmeans_pca,
 }

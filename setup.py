@@ -23,6 +23,12 @@ setuptools.setup(
                       "scipy",
                       "scikit-learn",
                       "umap-learn",
-                      "matplotlib"],
+                      "matplotlib",
+                      "joblib",
+                      "pandas",
+                      "hdbscan",
+                      "tqdm",
+                      "seaborn",
+                      "statsmodels"],
     python_requires='>=3.6',
 )

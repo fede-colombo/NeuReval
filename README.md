@@ -10,6 +10,7 @@ A stability-based relative clustering validation method to determine the best nu
     3. [Run NeuReval with opitmized clustering/classifier/preprocessing algorithms](#NeuReval)
     4. [Compute internal measures](#Internal_measures)
     5. [External validation](#Validation)
+    6. [Agreement metrics](#Metrics)
 4. [Example](#Example)
 5. [Notes](#Notes)
 6. [References](#References)
@@ -153,8 +154,9 @@ neureval.internal_baselines_confounds.select_best(data, modalities, covariates, 
 To test the replicability of clustering solutions in an external dataset, the ```evaluate_confounds``` function within the ```neureval.best_nclust_cv_confounds``` method can be used:
 
 ```python
-neureval.best_nclust_cv_confounds.evaluate_confounds(data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None)
+out = findbestclust.evaluate_confounds(data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None)
  ```
+Covariates are regressed out and preprocessing (if any) is fitted on the training set only, then applied to the validation set. A classifier is trained on the training clusters, the validation set is clustered independently, and the two labelings are compared.
 
 Parameters to be specified:
 - **data** : complete dataset with both training and hold-out sets
@@ -166,7 +168,43 @@ Parameters to be specified:
 - **tr_lab**: clustering labels for the training set. If not None the clustering algorithm is not performed and the classifier is fitted.
               Available for clustering methods without `n_clusters` parameter. Default None
   
-It returns accuracies in both training and validation sets and cluster labels in for the validation set
+It returns (or None if no clusters are identified):
+
+- **train_cllab, train_acc**: clustering labels and classifier accuracy in the training set
+- **test_cllab**: labels of the independent clustering of the validation set, matched to the training clusters
+- **test_acc**: agreement between the validation clustering and the classifier predictions (raw accuracy: its chance level depends on the number of clusters)
+- **test_classlab**: training cluster assigned by the classifier to each validation subject. Use these labels to assign new subjects to the training clusters
+- **test_stability**: normalized stability in the validation set, computed as in cross-validation: 0 means perfect replication, values close to 1 mean no better than chance. Use this value, rather than test_acc, to judge replicability
+
+The script 02_run_findbestclustcv shows how to define the training and validation sets from the subjects' IDs, so that the order of the rows in the input files does not matter.
+
+
+### Agreement metrics <a name="Metrics"></a>
+
+NeuReval measures how well a classifier trained on the training clusters predicts the clusters found independently in a validation set (a cross-validation fold or a hold-out set). Besides the accuracy used by NeuReval, the neureval.metrics module describes the same agreement with metrics that correct for chance and/or for clusters of different sizes:
+
+
+```python
+from neureval.metrics import agreement_metrics, cv_agreement_metrics
+
+# Cross-validation: one row per fold and number of clusters, and mean/SD for each number of clusters
+cv_per_fold, cv_summary = cv_agreement_metrics(findbestclust.cv_results_)
+
+# External validation
+out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx, nclust=bestncl)
+val_metrics, val_confusion_matrix = agreement_metrics(out.test_cllab, out.test_classlab)
+```
+Metrics:
+- **accuracy**: proportion of subjects with the same label (as in NeuReval)
+- **balanced_accuracy**: mean recall over the clusters, not inflated by large clusters
+- **cohen_kappa**: agreement corrected for chance (0 = chance, 1 = perfect)
+- **ARI**: adjusted Rand index (0 = chance, 1 = perfect)
+- **NMI, AMI**: normalized and adjusted mutual information
+- **majority_class_baseline**: accuracy obtained by assigning every subject to the largest cluster, a reference value for the accuracy
+- **cluster sizes** and **confusion matrix** (rows: clustering labels, columns: classifier predictions)
+
+Compare the accuracy with the majority class baseline: with clusters of different sizes, an accuracy that looks high can be close to (or below) what is obtained by assigning every subject to the largest cluster.
+
 
 ## 4. Example <a name="Example"></a>
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
