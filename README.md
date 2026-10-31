@@ -11,6 +11,7 @@ A stability-based relative clustering validation method to determine the best nu
     4. [Compute internal measures](#Internal_measures)
     5. [External validation](#Validation)
     6. [Agreement metrics](#Metrics)
+    7. [Site harmonization with ComBat](#Harmonization)
 4. [Example](#Example)
 5. [Notes](#Notes)
 6. [References](#References)
@@ -205,6 +206,43 @@ Metrics:
 
 Compare the accuracy with the majority class baseline: with clusters of different sizes, an accuracy that looks high can be close to (or below) what is obtained by assigning every subject to the largest cluster.
 
+### vii. Site harmonization with ComBat <a name="Harmonization"></a>
+With data from more than one site or scanner, site effects can be stronger than the differences between subgroups: clusters may then reflect the sites rather than biology. They can even replicate well in a hold-out set from the same sites, because the site effects are there too. *NeuReval* can harmonize the data with ComBat (```neureval.harmonization.ComBat```), removing additive and multiplicative site effects from each feature while preserving the effects of specified covariates (e.g. age, sex).
+
+ComBat is always **estimated on the training subjects only** and then applied to the validation subjects, so that no information leaks from the validation set. It is applied separately to each modality, before the correction for covariates. Results are identical to the reference implementation [neuroCombat](https://github.com/Jfortin1/neuroCombat) (parametric empirical Bayes).
+
+**Cross-validation** (```best_nclust_confounds``` and grid search ```ParamSelectionConfounds.fit```): give the site of each subject and, optionally, the covariates to preserve. ComBat is estimated on the training set of each fold, and the folds are stratified by site so that every site is in every training fold.
+
+```python
+metrics, bestncl, tr_lab = findbestclust.best_nclust_confounds(data, modalities, covariates, iter_cv=10,
+                                                               site=site, harmonize_covariates=cov[['Age', 'Sex']])
+```
+
+**Hold-out validation** (validation subjects from the same sites as the training subjects): the harmonization estimated in training is applied to the hold-out subjects.
+
+```python
+out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx, nclust=bestncl,
+                                       site=site, harmonize_covariates=harmonize_covariates)
+```
+
+**External validation in new sites** (not in the training set): ComBat cannot harmonize a site it has never seen, and *NeuReval* raises an error. Give a calibration sample of the new site (```calibration_idx```): the model estimated in training is kept fixed, only the location and scale effects of the new site are estimated from the calibration subjects, which are then excluded from the evaluation. The calibration subjects should be comparable to the training population (e.g. healthy controls in both): otherwise real differences between the populations are removed as if they were site effects.
+
+```python
+out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx, nclust=bestncl,
+                                       site=site, harmonize_covariates=harmonize_covariates,
+                                       calibration_idx=calibration_idx)
+```
+
+Parameters:
+- **site**: site of each subject (any labels)
+- **harmonize_covariates**: covariates whose effects ComBat must preserve, numerical (encode categorical variables, e.g. sex as 0/1). A single table for all modalities, or a dictionary with one table per modality (same keys as ```modalities```). For non-linear effects (e.g. of age), add the corresponding terms (e.g. age squared)
+- **calibration_idx**: calibration subjects of new sites, for external validation only
+- **harmonization** (class parameter): ComBat options, e.g. ```FindBestClustCVConfounds(..., harmonization=ComBat(eb=True, mean_only=False))```. Default: ComBat with empirical Bayes when a site is given
+
+Each site needs at least 2 subjects in each training set (in practice many more: site effects are estimated from these subjects).
+
+Script **02_run_findbestclustcv** shows how to use site harmonization in cross-validation (section 1) and in hold-out or external validation (section 3).
+
 
 ## 4. Example <a name="Example"></a>
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
@@ -217,4 +255,8 @@ An example of how to perform *NeuReval* can be found in the folder **NeuReval/sc
 *NeuReval* was developed in Python 3.8.10 and tested on ubuntu 20.04. In case of any issues in running *NeuReval* on other operating systems (i.e., Windows), you can send an email at the following address: fcolombo.italia@gmail.com
 
 ## 6. References <a name="References"></a>
+Fortin, J. P., Cullen, N., Sheline, Y. I., Taylor, W. D., Aselcioglu, I., Cook, P. A., ... & Shinohara, R. T. (2018). Harmonization of cortical thickness measurements across scanners and sites. _NeuroImage_, 167, 104-120.
+
+Johnson, W. E., Li, C., & Rabinovic, A. (2007). Adjusting batch effects in microarray expression data using empirical Bayes methods. _Biostatistics_, 8(1), 118-127.
+
 Landi, I., Mandelli, V., & Lombardo, M. V. (2021). reval: A Python package to determine best clustering solutions with stability-based relative clustering validation. _Patterns_, 2(4), 100228.
