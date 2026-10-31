@@ -65,14 +65,17 @@ covariates = {'feature_01': cov.iloc[:,2:],
 # specify the site of each subject and the covariates whose effects ComBat must preserve (e.g. age, sex).
 # ComBat is estimated on the training set of each fold and applied to its validation set, before the
 # correction for covariates; the folds are stratified by site. Leave site = None for single-site data.
+# If the site is a column of the covariates file, exclude it from the covariates dictionary above,
+# which is used for the confound correction (e.g. cov[['Age', 'Sex', 'TIV']] instead of cov.iloc[:,2:]).
 site = None
 # site = cov['Site'].to_numpy()
 harmonize_covariates = None
 # harmonize_covariates = cov[['Age', 'Sex']]   # or a dictionary with one table per modality
 
 # Define clusteirng and classifier algortihms with optimized parameters
+# n_init: number of initializations of the Gaussian mixture (more stable results than a single one)
 s = SVC(C=1, kernel='rbf', random_state=42)
-c = GaussianMixture(covariance_type='full', random_state=42)
+c = GaussianMixture(covariance_type='full', n_init=10, random_state=42)
 # Uncomment the following line if you also optimized preprocessing steps
 # preproc = UMAP(n_components=2, n_neighbors=30, min_dist=0.0, random_state=42)
 preproc = None
@@ -286,6 +289,8 @@ val_idx = ~tr_idx
 site_col = None               # e.g. 'Site': column of the covariates file with the site of each subject
 harmonize_cols = None         # e.g. ['Age', 'Sex']: covariates whose effects ComBat must preserve
 calibration_ids_file = None   # e.g. 'calibration_ids.csv': file with the IDs (column id_col) of the calibration subjects
+# If site_col is a column of the covariates file, exclude it from covariates_val below, which is used for
+# the confound correction (e.g. cov_all[['Age', 'Sex', 'TIV']] instead of cov_all.iloc[:, 2:]).
 
 site = cov_all[site_col].to_numpy() if site_col is not None else None
 harmonize_covariates = cov_all[harmonize_cols] if harmonize_cols is not None else None
@@ -316,7 +321,7 @@ covariates_val = {'feature_01': cov_all.iloc[:, 2:],
 # Define classifier, clustering and (if used) preprocessing algorithms with the optimized parameters,
 # the same used in section 1
 s = SVC(C=1, kernel='rbf', random_state=42)
-c = GaussianMixture(covariance_type='full', random_state=42)
+c = GaussianMixture(covariance_type='full', n_init=10, random_state=42)
 # If you also optimized preprocessing steps, uncomment the following line and set preprocessing=preproc below
 # preproc = UMAP(n_components=2, n_neighbors=30, min_dist=0.0, random_state=42)
 findbestclust = FindBestClustCVConfounds(c, s, preprocessing=None, nrand=10)

@@ -58,6 +58,19 @@ covariates = {'feature_01': cov.iloc[:,2:],
               'feature_02': cov.iloc[:,2:-2],
               'feature_03': cov.iloc[:,2:-1]}
 
+# Site harmonization with ComBat (optional). If the data come from more than one site or scanner,
+# specify the site of each subject and the covariates whose effects ComBat must preserve (e.g. age, sex).
+# ComBat is estimated on the training set of each fold and applied to its validation set, before the
+# correction for covariates; the folds are stratified by site. Leave site = None for single-site data.
+# Use the same settings here and in 02_run_findbestclustcv.py, so that the parameters are optimized
+# on data prepared in the same way as in the final analysis.
+# If the site is a column of the covariates file, exclude it from the covariates dictionary above,
+# which is used for the confound correction (e.g. cov[['Age', 'Sex', 'TIV']] instead of cov.iloc[:,2:]).
+site = None
+# site = cov['Site'].to_numpy()
+harmonize_covariates = None
+# harmonize_covariates = cov[['Age', 'Sex']]   # or a dictionary with one table per modality
+
 # Define clustering, classifier, and preprocessing parameters to be optimized.
 # params should be a dictionary of the form {‘s’: {classifier parameter grid}, ‘c’: {clustering parameter grid}} 
 # including the lists of classifiers and clustering methods to fit to the data.
@@ -69,7 +82,9 @@ params = {'s': {'C': [0.01, 0.1, 1, 10, 100, 1000],
           'preprocessing': {'n_components': list(range(2,6))}}
 
 # Define classifier and clustering methods
-c = GaussianMixture(random_state=42)
+# n_init: number of initializations of the Gaussian mixture. With a single one (scikit-learn default)
+# it can converge to a poor solution; several initializations make the results more stable
+c = GaussianMixture(n_init=10, random_state=42)
 s = SVC(random_state=42)
 
 # If you want to perform dimensionality reduction, uncomment the following line. Change the dimensionality reduction algorithm accordingly (e.g., UMAP, PCA)
@@ -77,6 +92,7 @@ s = SVC(random_state=42)
 preproc = None
 
 # Parameters selection
+# strat: stratification vector for cross-validation splits, default None (stratified by site if site is given)
 best_model = ParamSelectionConfounds(params, 
                                       cv=2, 
                                       s=s, 
@@ -88,7 +104,7 @@ best_model = ParamSelectionConfounds(params,
                                       clust_range=list(range(2,6)),
                                       strat=None)
 
-best_model.fit(data,modalities,covariates)
+best_model.fit(data, modalities, covariates, site=site, harmonize_covariates=harmonize_covariates)
 
 # Save model's parameters in the output directory. Change file name to match the model you performed
 best_results = best_model.best_param_
