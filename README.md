@@ -179,7 +179,7 @@ It returns (or None if no clusters are identified):
 The script 02_run_findbestclustcv shows how to define the training and validation sets from the subjects' IDs, so that the order of the rows in the input files does not matter.
 
 
-### Agreement metrics <a name="Metrics"></a>
+### vi. Agreement metrics <a name="Metrics"></a>
 
 NeuReval measures how well a classifier trained on the training clusters predicts the clusters found independently in a validation set (a cross-validation fold or a hold-out set). Besides the accuracy used by NeuReval, the neureval.metrics module describes the same agreement with metrics that correct for chance and/or for clusters of different sizes:
 
