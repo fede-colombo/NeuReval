@@ -7,6 +7,7 @@
 import numpy as np
 from sklearn.metrics import zero_one_loss
 from neureval.utils import kuhn_munkres_algorithm
+from neureval.harmonization import _resolve_harmonizer, harmonize_modalities
 import logging
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -35,9 +36,13 @@ class RelativeValidationConfounds:
     :type preprocessing: class
     :param nrand: number of iterations to normalize cluster stability.
     :type nrand: int
+    :param harmonization: site harmonization method, e.g. neureval.harmonization.ComBat(),
+        applied when the site of each subject is given. Default None: ComBat with default
+        settings if a site is given, no harmonization otherwise.
+    :type harmonization: class
     """
 
-    def __init__(self, c, s, preprocessing=None, nrand=10):
+    def __init__(self, c, s, preprocessing=None, nrand=10, harmonization=None):
         """
         Construct method.
         """
@@ -45,6 +50,7 @@ class RelativeValidationConfounds:
         self.class_method = s
         self.preproc_method = preprocessing
         self.nrand = nrand
+        self.harmonization = harmonization
         
     def GLMcorrection_confounds(self, modalities,covariates, tr_idx, val_idx):
         """
@@ -105,11 +111,12 @@ class RelativeValidationConfounds:
         
         return train_cor_dic, test_cor_dic
 
-    def _prepare_fold(self, modalities, covariates, tr_idx, val_idx):
+    def _prepare_fold(self, modalities, covariates, tr_idx, val_idx, site=None,
+                      harmonize_covariates=None, calibration_idx=None):
         """
-        Prepare the data of one cross-validation fold for clustering: confound
-        correction, concatenation of the modalities and (if specified) preprocessing,
-        fitted on the training set and applied to both sets.
+        Prepare the data of one cross-validation fold for clustering: site harmonization
+        (if a site is given), confound correction, concatenation of the modalities and
+        (if specified) preprocessing, fitted on the training set and applied to both sets.
 
         These steps depend only on the fold (and on the preprocessing parameters),
         not on the number of clusters or on the clustering/classifier parameters.
@@ -124,9 +131,23 @@ class RelativeValidationConfounds:
         :type tr_idx: array
         :param val_idx: index specifying the validation dataset
         :type val_idx: array
+        :param site: site of each subject, default None (no harmonization).
+        :type site: array-like
+        :param harmonize_covariates: covariates whose effects the harmonization must preserve:
+            one table for all modalities or a dictionary with one table per modality. Default None.
+        :type harmonize_covariates: DataFrame, dictionary or None
+        :param calibration_idx: subjects of new sites used only to calibrate those sites
+            (external validation). Default None.
+        :type calibration_idx: array
         :return: training and validation datasets ready for clustering.
         :rtype: ndarray, ndarray
         """
+        harmonizer = _resolve_harmonizer(self.harmonization, site, harmonize_covariates, calibration_idx)
+        if harmonizer is not None:
+            # Estimated on the training subjects only, then applied to both sets (no leakage).
+            # Done before the confound correction, preserving the specified covariates.
+            modalities = harmonize_modalities(harmonizer, modalities, site, harmonize_covariates,
+                                              tr_idx, val_idx, calibration_idx)
         train_cor_dic, test_cor_dic = self.GLMcorrection_confounds(modalities, covariates, tr_idx, val_idx)
         X_train_cor = np.concatenate([np.array(train_cor_dic[mod]) for mod in train_cor_dic], axis=1)
         X_test_cor = np.concatenate([np.array(test_cor_dic[mod]) for mod in test_cor_dic], axis=1)

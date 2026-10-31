@@ -6,7 +6,9 @@
 
 from neureval.relative_validation_confounds import RelativeValidationConfounds
 from neureval.best_nclust_cv_confounds import (FindBestClustCVConfounds, _prepare_folds,
-                                               _prepare_folds_multi, _run_tasks, _check_n_jobs)
+                                               _prepare_folds_multi, _run_tasks, _check_n_jobs,
+                                               _n_subjects)
+from neureval.harmonization import _check_harmonization_inputs
 from sklearn.base import clone
 from sklearn.model_selection import ParameterGrid
 import multiprocessing as mp
@@ -41,8 +43,13 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
     :type n_jobs: int
     :param iter_cv: number of repeated cv loops, default 1.
     :type iter_cv: int
-    :param strat: stratification vector for cross-validation splits, default None.
+    :param strat: stratification vector for cross-validation splits, default None
+        (stratified by site if a site is given to `fit`).
     :type strat: numpy array
+    :param harmonization: site harmonization method, e.g. neureval.harmonization.ComBat().
+        Used when the site of each subject is given to `fit`; default None (ComBat with
+        default settings if a site is given).
+    :type harmonization: class
     :param combined_data: if True, only grey matter features will be adjusted for TIV.
         Otherwise, both grey and white matter features will be adjusted for the same set of covariates.
     :type combined_data: boolean value
@@ -57,8 +64,8 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
     """
 
     def __init__(self, params, cv, c, s, preprocessing, nrand,
-                n_jobs=1, iter_cv=1, strat=None, clust_range=None):
-        super().__init__(c, s, preprocessing, nrand)
+                n_jobs=1, iter_cv=1, strat=None, clust_range=None, harmonization=None):
+        super().__init__(c, s, preprocessing, nrand, harmonization)
         self.params = params
         self.cv = cv
         self.iter_cv = iter_cv
@@ -66,7 +73,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         self.n_jobs = _check_n_jobs(n_jobs)
         self.strat = strat
 
-    def fit(self, data_tr, mod_tr, cov_tr, nclass=None):
+    def fit(self, data_tr, mod_tr, cov_tr, nclass=None, site=None, harmonize_covariates=None):
         """
         Class method that performs grid search cross-validation on training data. It
         deals with the error due to wrong parameter combinations (e.g., ward linkage
@@ -83,8 +90,17 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         :type cov_tr: dictionary
         :param nclass: number of true classes, default None.
         :type nclass: int
+        :param site: site of each subject. If given, the data are harmonized across sites
+            (ComBat by default), estimating the harmonization on the training set of each fold.
+            Default None.
+        :type site: array-like
+        :param harmonize_covariates: covariates whose effects the harmonization must preserve
+            (e.g. age, sex): one table for all modalities, or a dictionary with one table per
+            modality. Default None.
+        :type harmonize_covariates: DataFrame, dictionary or None
         """
-        # Confound correction and preprocessing do not depend on the clustering and
+        _check_harmonization_inputs(_n_subjects(mod_tr, cov_tr), mod_tr, site, harmonize_covariates)
+        # Harmonization, confound correction and preprocessing do not depend on the clustering and
         # classifier parameters: prepare the cross-validation folds once (once for each
         # combination of preprocessing parameters) and share them across the grid.
         if self.preproc_method is not None:
@@ -92,18 +108,20 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
             preproc_grid = list(grid['preprocessing'])
             revals = [RelativeValidationConfounds(self.clust_method, self.class_method,
                                                   clone(self.preproc_method).set_params(**param_preproc),
-                                                  self.nrand)
+                                                  self.nrand, self.harmonization)
                       for param_preproc in preproc_grid]
             folds_by_preproc = _prepare_folds_multi(revals, data_tr, mod_tr, cov_tr, self.cv,
-                                                    self.iter_cv, self.strat, self.n_jobs)
+                                                    self.iter_cv, self.strat, self.n_jobs,
+                                                    site, harmonize_covariates)
             new_grid = list(itertools.product(grid['c'], grid['s'], preproc_grid))
             new_params = [(ng[0], ng[1], ng[2], folds_by_preproc[preproc_grid.index(ng[2])])
                           for ng in new_grid if self._allowed_par(ng[0])]
         else:
             grid = {'c': ParameterGrid(self.params['c']), 's': ParameterGrid(self.params['s'])}
-            reval = RelativeValidationConfounds(self.clust_method, self.class_method, None, self.nrand)
+            reval = RelativeValidationConfounds(self.clust_method, self.class_method, None, self.nrand,
+                                                self.harmonization)
             folds = _prepare_folds(reval, data_tr, mod_tr, cov_tr, self.cv, self.iter_cv, self.strat,
-                                   self.n_jobs)
+                                   self.n_jobs, site, harmonize_covariates)
             new_grid = list(itertools.product(grid['c'], grid['s']))
             new_params = [(ng[0], ng[1], None, folds) for ng in new_grid if self._allowed_par(ng[0])]
 

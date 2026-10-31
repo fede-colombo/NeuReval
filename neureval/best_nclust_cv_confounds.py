@@ -6,6 +6,7 @@
 
 from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
 from neureval.relative_validation_confounds import RelativeValidationConfounds
+from neureval.harmonization import _check_harmonization_inputs
 from collections import namedtuple
 from scipy import stats
 import numpy as np
@@ -23,7 +24,8 @@ logging.basicConfig(format='%(asctime)s, %(levelname)s %(message)s',
                     level=logging.INFO)
 
 
-def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_vect=None, n_jobs=1):
+def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_vect=None, n_jobs=1,
+                   site=None, harmonize_covariates=None):
     """
     Generate the (repeated) cross-validation folds and prepare the data of each
     fold once (confound correction and, if specified, preprocessing) with
@@ -45,16 +47,21 @@ def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_
     :type strat_vect: ndarray, (n_samples,)
     :param n_jobs: number of parallel processes, default 1.
     :type n_jobs: int
+    :param site: site of each subject, for harmonization. If given and strat_vect is None,
+        the folds are stratified by site. Default None.
+    :type site: array-like
+    :param harmonize_covariates: covariates whose effects the harmonization must preserve.
+    :type harmonize_covariates: DataFrame, dictionary or None
     :return: one tuple (train indices, validation indices, prepared training data,
         prepared validation data) for each fold.
     :rtype: list
     """
     return _prepare_folds_multi([reval], data, modalities, covariates, nfold,
-                                iter_cv, strat_vect, n_jobs)[0]
+                                iter_cv, strat_vect, n_jobs, site, harmonize_covariates)[0]
 
 
 def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
-                         strat_vect=None, n_jobs=1):
+                         strat_vect=None, n_jobs=1, site=None, harmonize_covariates=None):
     """
     Same as :func:`_prepare_folds` for several `RelativeValidationConfounds` objects
     (e.g. one for each combination of preprocessing parameters), on the same folds.
@@ -63,6 +70,10 @@ def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
     :return: for each object in `revals`, the list of its prepared folds.
     :rtype: list of lists
     """
+    if strat_vect is None and site is not None:
+        # With harmonization every site must be in every training fold: stratify by site
+        strat_vect = np.asarray(site)
+        logging.info("Site harmonization: cross-validation folds stratified by site.")
     if strat_vect is not None:
         kfold = RepeatedStratifiedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
     else:
@@ -71,18 +82,19 @@ def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
     jobs = [(reval, tr_idx, val_idx) for reval in revals for tr_idx, val_idx in splits]
     if n_jobs > 1 and len(jobs) > 1:
         prepared = Parallel(n_jobs=n_jobs)(
-            delayed(_prepare_one)(reval, modalities, covariates, tr_idx, val_idx)
+            delayed(_prepare_one)(reval, modalities, covariates, tr_idx, val_idx, site, harmonize_covariates)
             for reval, tr_idx, val_idx in jobs)
     else:
-        prepared = [_prepare_one(reval, modalities, covariates, tr_idx, val_idx)
+        prepared = [_prepare_one(reval, modalities, covariates, tr_idx, val_idx, site, harmonize_covariates)
                     for reval, tr_idx, val_idx in jobs]
     n = len(splits)
     return [prepared[i * n:(i + 1) * n] for i in range(len(revals))]
 
 
-def _prepare_one(reval, modalities, covariates, tr_idx, val_idx):
+def _prepare_one(reval, modalities, covariates, tr_idx, val_idx, site=None, harmonize_covariates=None):
     """Prepare one fold: (train indices, validation indices, prepared train, prepared validation)."""
-    return (tr_idx, val_idx) + reval._prepare_fold(modalities, covariates, tr_idx, val_idx)
+    return (tr_idx, val_idx) + reval._prepare_fold(modalities, covariates, tr_idx, val_idx,
+                                                   site, harmonize_covariates)
 
 
 class FindBestClustCVConfounds(RelativeValidationConfounds):
@@ -113,23 +125,27 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
     :param n_jobs: number of processes to be run in parallel, default 1.
         Negative values follow the joblib convention: -1 uses all CPUs, -2 all CPUs but one.
     :type n_jobs: int
+    :param harmonization: site harmonization method, e.g. neureval.harmonization.ComBat(eb=True,
+        mean_only=False). Used when the site of each subject is given; default None (ComBat
+        with default settings if a site is given).
+    :type harmonization: class
 
     :attribute: cv_results_ dataframe with cross validation results. Columns are
         ncl = number of clusters; ms_tr = misclassification training;
         ms_val = misclassification validation.
     """
 
-    def __init__(self, c, s, preprocessing, nrand, nfold=2, n_jobs=1, nclust_range=None):
+    def __init__(self, c, s, preprocessing, nrand, nfold=2, n_jobs=1, nclust_range=None, harmonization=None):
         """
         Construct method.
         """
-        super().__init__(c, s, preprocessing, nrand)
+        super().__init__(c, s, preprocessing, nrand, harmonization)
         self.nfold = nfold
         self.n_jobs = _check_n_jobs(n_jobs)
         self.nclust_range = nclust_range
 
     def best_nclust_confounds(self, data, modalities, covariates, iter_cv=1, strat_vect=None,
-                              prepared_folds=None):
+                              prepared_folds=None, site=None, harmonize_covariates=None):
         """
         This method takes as input the training dataset and the
         stratification vector (if available) and performs a
@@ -151,18 +167,31 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             prepare the folds once for all parameter combinations. If None, folds are
             prepared here.
         :type prepared_folds: list
+        :param site: site of each subject. If given, the data are harmonized across sites
+            (ComBat by default, see `harmonization`), estimating the harmonization on the
+            training set of each fold. If strat_vect is None, the folds are stratified by
+            site, so that every site is in every training fold. Default None.
+        :type site: array-like, (n_samples,)
+        :param harmonize_covariates: covariates whose effects the harmonization must preserve
+            (e.g. age, sex): one table for all modalities, or a dictionary with one table per
+            modality (same keys as `modalities`). Default None.
+        :type harmonize_covariates: DataFrame, dictionary or None
         :return: CV metrics for training and validation sets, best number of clusters,
             misclassification errors at each CV iteration.
         :rtype: dictionary, int, (list) if n_clusters parameter is not available
         """
         
-        reval = RelativeValidationConfounds(self.clust_method, self.class_method, self.preproc_method, self.nrand)
+        reval = RelativeValidationConfounds(self.clust_method, self.class_method, self.preproc_method,
+                                            self.nrand, self.harmonization)
 
-        # Confound correction and preprocessing depend only on the fold:
+        # Harmonization, confound correction and preprocessing depend only on the fold:
         # compute them once per fold and reuse them for every number of clusters.
         if prepared_folds is None:
+            _check_harmonization_inputs(_n_subjects(modalities, covariates), modalities, site,
+                                        harmonize_covariates)
             prepared_folds = _prepare_folds(reval, data, modalities, covariates,
-                                           self.nfold, iter_cv, strat_vect, self.n_jobs)
+                                           self.nfold, iter_cv, strat_vect, self.n_jobs,
+                                           site, harmonize_covariates)
         params = self._make_tasks(reval, prepared_folds)
         out = _run_tasks(params, self.n_jobs)
         return self._aggregate_results(params, out)
@@ -251,7 +280,8 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             tr_lab = [lab for _, lab in sorted(zip(idx_vect, label_vect))]
             return metrics, bestncl, tr_lab
     
-    def evaluate_confounds(self, data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None):
+    def evaluate_confounds(self, data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None,
+                           site=None, harmonize_covariates=None, calibration_idx=None):
         """
         External validation: tests whether the clustering solution found in the training
         set replicates in a validation (hold-out or external) set.
@@ -281,6 +311,26 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             labels (e.g. for methods without `n_clusters`, using the labels found during
             cross-validation). Default None.
         :type tr_lab: array-like
+        :param site: site of each subject. If given, the data are harmonized across sites
+            (ComBat by default, see `harmonization`), estimating the harmonization on the
+            training subjects only. Default None.
+
+            - Hold-out validation: validation subjects come from the same sites as the training
+              subjects; the harmonization estimated in training is applied to them.
+            - External validation in new sites: give `calibration_idx`.
+        :type site: array-like, (n_samples,)
+        :param harmonize_covariates: covariates whose effects the harmonization must preserve
+            (e.g. age, sex): one table for all modalities, or a dictionary with one table per
+            modality (same keys as `modalities`). Default None.
+        :type harmonize_covariates: DataFrame, dictionary or None
+        :param calibration_idx: for external validation in sites that are not in the training
+            set: subjects of those sites used only to estimate their site effects, while the
+            harmonization model estimated in training stays fixed. They must not overlap with
+            the training or validation subjects, must include every new site of the validation
+            set, and should be comparable to the training population (e.g. healthy controls in
+            both), otherwise real differences between populations are removed as site effects.
+            Integer row positions or boolean mask. Default None.
+        :type calibration_idx: array-like
         :return: namedtuple with fields
 
             - train_cllab: clustering labels of the training subjects;
@@ -313,6 +363,26 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             if len(tr_lab) != len(tr_idx):
                 raise ValueError(f"tr_lab has {len(tr_lab)} labels but the training set has "
                                  f"{len(tr_idx)} subjects.")
+        _check_harmonization_inputs(n_samples, modalities, site, harmonize_covariates)
+        if calibration_idx is not None:
+            if site is None:
+                raise ValueError("calibration_idx needs the site of each subject (site=...).")
+            calibration_idx = _check_indices(calibration_idx, n_samples, 'calibration_idx')
+            for name, idx in (('training', tr_idx), ('validation', val_idx)):
+                overlap = np.intersect1d(calibration_idx, idx)
+                if len(overlap) > 0:
+                    raise ValueError(f"{len(overlap)} calibration subject(s) are also in the {name} set: "
+                                     f"calibration subjects must not be used for training or evaluation.")
+            site_arr = np.asarray(site)
+            tr_sites = np.unique(site_arr[tr_idx])
+            cal_sites = np.unique(site_arr[calibration_idx])
+            in_training = np.intersect1d(cal_sites, tr_sites)
+            if len(in_training) > 0:
+                raise ValueError(f"Calibration subjects come from site(s) {in_training.tolist()}, which are "
+                                 f"in the training set: calibrate only new sites. Subjects of training "
+                                 f"sites are harmonized with the model estimated in training.")
+            logging.info(f"External validation: site(s) {cal_sites.tolist()} calibrated on "
+                         f"{len(calibration_idx)} subjects, excluded from the evaluation.")
 
         # Work on copies of the estimators, so that the objects passed by the user are not modified
         clust_method = clone(self.clust_method)
@@ -325,9 +395,12 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
                 clust_method.set_params(**{par: nclust})
                 break
         preproc = clone(self.preproc_method) if self.preproc_method is not None else None
-        reval = RelativeValidationConfounds(clust_method, clone(self.class_method), preproc, self.nrand)
+        harmonization = clone(self.harmonization) if self.harmonization is not None else None
+        reval = RelativeValidationConfounds(clust_method, clone(self.class_method), preproc, self.nrand,
+                                            harmonization)
 
-        X_train_prep, X_test_prep = reval._prepare_fold(modalities, covariates, tr_idx, val_idx)
+        X_train_prep, X_test_prep = reval._prepare_fold(modalities, covariates, tr_idx, val_idx, site,
+                                                        harmonize_covariates, calibration_idx)
         train_res = reval._cluster_and_classify_train(X_train_prep, tr_lab)
         if train_res is None:
             logging.warning(f"Evaluation not possible: no clusters were identified in the training set "

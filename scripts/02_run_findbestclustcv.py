@@ -61,9 +61,21 @@ covariates = {'feature_01': cov.iloc[:,2:],
               'feature_02': cov.iloc[:,2:-2],
               'feature_03': cov.iloc[:,2:-1]}
 
+# Site harmonization with ComBat (optional). If the data come from more than one site or scanner,
+# specify the site of each subject and the covariates whose effects ComBat must preserve (e.g. age, sex).
+# ComBat is estimated on the training set of each fold and applied to its validation set, before the
+# correction for covariates; the folds are stratified by site. Leave site = None for single-site data.
+# If the site is a column of the covariates file, exclude it from the covariates dictionary above,
+# which is used for the confound correction (e.g. cov[['Age', 'Sex', 'TIV']] instead of cov.iloc[:,2:]).
+site = None
+# site = cov['Site'].to_numpy()
+harmonize_covariates = None
+# harmonize_covariates = cov[['Age', 'Sex']]   # or a dictionary with one table per modality
+
 # Define clusteirng and classifier algortihms with optimized parameters
+# n_init: number of initializations of the Gaussian mixture (more stable results than a single one)
 s = SVC(C=1, kernel='rbf', random_state=42)
-c = GaussianMixture(covariance_type='full', random_state=42)
+c = GaussianMixture(covariance_type='full', n_init=10, random_state=42)
 # Uncomment the following line if you also optimized preprocessing steps
 # preproc = UMAP(n_components=2, n_neighbors=30, min_dist=0.0, random_state=42)
 preproc = None
@@ -80,11 +92,10 @@ findbestclust = FindBestClustCVConfounds(c,s, preprocessing=preproc, nfold=2, nr
 # Run FindBestClustCVConfounds. It returns normlaized stability (metrics), best number of clusters (bestncl), and clusters' labels (tr_lab).
 # Parameters to be specified:
 # iter_cv: number of repeated cross-validation, default 1
-# strat: stratification vector for cross-validation splits, default None
-# combined_data: define whether multimodal data are used as input features. 
-#               If True, different sets of covariates will be applied for each modality
-#               e.g. correction for TIV only for grey matter features. Default False 
-metrics, bestncl, tr_lab = findbestclust.best_nclust_confounds(data, modalities, covariates, iter_cv=10, strat_vect=None)
+# strat_vect: stratification vector for cross-validation splits, default None (stratified by site if site is given)
+# site, harmonize_covariates: site harmonization with ComBat (see above), default None
+metrics, bestncl, tr_lab = findbestclust.best_nclust_confounds(data, modalities, covariates, iter_cv=10, strat_vect=None,
+                                                               site=site, harmonize_covariates=harmonize_covariates)
 val_results = list(metrics['val'].values())
 val_results = np.array(val_results, dtype=object)
 
@@ -269,6 +280,29 @@ if training_ids.duplicated().any():
 tr_idx = data_all[id_col].isin(training_ids).to_numpy()
 val_idx = ~tr_idx
 
+# Site harmonization with ComBat (optional), estimated on the training subjects only.
+# - Hold-out validation: the hold-out subjects come from the same sites as the training subjects.
+#   Specify site_col (and harmonize_cols): the harmonization estimated in training is applied to them.
+# - External validation in a new site (not in the training set): also specify a calibration sample
+#   of the new site (e.g. healthy controls, comparable to the training population). It is used only
+#   to estimate the site effects of the new site and is excluded from the evaluation.
+site_col = None               # e.g. 'Site': column of the covariates file with the site of each subject
+harmonize_cols = None         # e.g. ['Age', 'Sex']: covariates whose effects ComBat must preserve
+calibration_ids_file = None   # e.g. 'calibration_ids.csv': file with the IDs (column id_col) of the calibration subjects
+# If site_col is a column of the covariates file, exclude it from covariates_val below, which is used for
+# the confound correction (e.g. cov_all[['Age', 'Sex', 'TIV']] instead of cov_all.iloc[:, 2:]).
+
+site = cov_all[site_col].to_numpy() if site_col is not None else None
+harmonize_covariates = cov_all[harmonize_cols] if harmonize_cols is not None else None
+calibration_idx = None
+if calibration_ids_file is not None:
+    calibration_ids = load_table(os.path.join(data_path, calibration_ids_file))[id_col]
+    calibration_idx = data_all[id_col].isin(calibration_ids).to_numpy()
+    if (calibration_idx & tr_idx).any():
+        raise Exception('Some calibration subjects are also training subjects. Please check them')
+    val_idx = val_idx & ~calibration_idx     # calibration subjects are not evaluated
+    print(f"Calibration sample size: {calibration_idx.sum()}")
+
 # Check the sample size of training and hold-out sets
 print(f"Training set sample size: {tr_idx.sum()}")
 print(f"Hold-out set sample size: {val_idx.sum()}")
@@ -287,7 +321,7 @@ covariates_val = {'feature_01': cov_all.iloc[:, 2:],
 # Define classifier, clustering and (if used) preprocessing algorithms with the optimized parameters,
 # the same used in section 1
 s = SVC(C=1, kernel='rbf', random_state=42)
-c = GaussianMixture(covariance_type='full', random_state=42)
+c = GaussianMixture(covariance_type='full', n_init=10, random_state=42)
 # If you also optimized preprocessing steps, uncomment the following line and set preprocessing=preproc below
 # preproc = UMAP(n_components=2, n_neighbors=30, min_dist=0.0, random_state=42)
 findbestclust = FindBestClustCVConfounds(c, s, preprocessing=None, nrand=10)
@@ -302,8 +336,11 @@ bestncl = 3
 # tr_idx, val_idx: training and hold-out subjects (boolean masks or integer row positions)
 # nclust: best number of clusters identified in the training dataset (i.e., bestncl)
 # tr_lab: clustering labels for the training set. If not None, the clustering algorithm is not performed and the classifier is fitted. Default None
+# site, harmonize_covariates, calibration_idx: site harmonization with ComBat (see above), default None
 out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx,
-                                       nclust=bestncl, tr_lab=None)
+                                       nclust=bestncl, tr_lab=None, site=site,
+                                       harmonize_covariates=harmonize_covariates,
+                                       calibration_idx=calibration_idx)
 if out is None:
     raise Exception('No clusters were identified in the training or hold-out set')
 
