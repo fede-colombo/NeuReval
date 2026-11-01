@@ -148,8 +148,9 @@ neureval.internal_baselines_confounds.select_best(data, modalities, covariates, 
  - **preprocessing**:  data reduction algorithm object (with optimized parameters), default ```None```
  - **select**: it can be ‘min’, if the internal measure is to be minimized or ‘max’ if the internal measure should be maximized
  - **nclust_range**: range of clusters to consider, default ```None```
+ - **site**, **harmonize_covariates**: site harmonization with ComBat (see [Site harmonization with ComBat](#Harmonization)), default ```None```. Use the same setting as in the *NeuReval* analysis, so that the comparison is fair. Here ComBat is estimated on all subjects, as the internal measures are computed on the whole dataset
 
-**Notes**: in case Gaussian Mixture Model was implemented as clustering algorithm, the ```select_best_bic_aic``` function can be used to compute Akaike and Bayesian Information Criterion (AIC, BIC) and used them for model's selection.
+**Notes**: in case Gaussian Mixture Model was implemented as clustering algorithm, the ```select_best_bic_aic``` function can be used to compute Akaike and Bayesian Information Criterion (AIC, BIC) and used them for model's selection. The ```evaluate_best``` function returns the internal measure for a given number of clusters (```ncl```). The clustering object passed to these functions is not modified.
 
 ### v. External validation <a name="Validation"></a>
 To test the replicability of clustering solutions in an external dataset, the ```evaluate_confounds``` function within the ```neureval.best_nclust_cv_confounds``` method can be used:
