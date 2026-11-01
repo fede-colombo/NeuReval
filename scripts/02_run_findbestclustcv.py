@@ -17,7 +17,7 @@ from neureval.param_selection_confounds import ParamSelectionConfounds
 from neureval.visualization import plot_metrics
 from sklearn.metrics import zero_one_loss, adjusted_mutual_info_score
 from umap import UMAP
-from hdbscan import HDBSCAN
+from sklearn.cluster import HDBSCAN
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier

@@ -37,13 +37,21 @@ While the original version of *NeuReval* was limited to perform different confou
 The most recent version of *NeuReval* can be installed with pip using the following command:
 
 ```python
-pip install neureval==1.1.0
+pip install neureval
 ```
-Dependencies useful to install *NeuReval* can be found in requirements.txt
+*NeuReval* requires Python 3.10 or later. The dependencies are installed automatically.
+
+To develop *NeuReval* or run its tests, clone the repository and install it in editable mode, together with the dependencies used by the tests (listed in requirements.txt):
+
+```python
+pip install -e .
+pip install -r requirements.txt
+pytest tests/
+```
 
 ## 3. How to use NeuReval <a name="Use"></a>
 ### i. Input structure <a name="Input"></a>
-*NeuReval* requires that input features and covariates are organized as file excel in the following way:
+*NeuReval* requires two files, one with the input features and one with the covariates, with one row per subject and the subjects in the same order in both files. Files can be CSV (.csv) or Excel (.xlsx, .xls) and are read with ```neureval.utils.load_table```.
 
 for database with **input features (database.xlsx)**:
 - First column: subject ID
@@ -61,7 +69,7 @@ Example of database structure for input features:
 for database with **covariates (covariates.xlsx)**:
 - First column: subject ID
 - Second column: diagnosis (e.g., patients=1, healhty controls=0). In case *NeuReval* is run on a single diagnostic group, provide a costant value for all subjects.
-- From the third column: covariates
+- From the third column: covariates. Covariates must be numerical: encode categorical variables (e.g., sex as 0/1; variables with more than two levels as separate 0/1 columns).
 
 Example of database structure for covariates:
 
@@ -71,28 +79,48 @@ Example of database structure for covariates:
 | sub_0002    | 1         | 37  | 1   | 1372.93 |
 | sub_0003    | 0         | 43  | 0   | 1285.88 |
 
+The features of each modality (e.g., grey matter, FA) and the covariates to regress out for each modality are then selected as dictionaries of columns (see the scripts in **NeuReval/scripts**), e.g. ```modalities = {'GM': data.iloc[:, 2:124], 'FA': data.iloc[:, 124:]}``` and ```covariates = {'GM': cov[['Age', 'Sex', 'TIV']], 'FA': cov[['Age', 'Sex']]}```.
 
-**Notes**: for external validation, a single data and corresponding covariates file including both training and validation sets should be created, with observations belonging to the validation set placed after those belonging to the training set
+**Multi-site data.** To harmonize data from different sites or scanners with ComBat (see [Site harmonization with ComBat](#Harmonization)), add a column with the site of each subject to the covariates file (any labels, e.g. site names). The site is used for harmonization, not for the confound correction: **exclude it from the covariates dictionary** (e.g., ```cov[['Age', 'Sex', 'TIV']]``` rather than ```cov.iloc[:, 2:]```), and pass it separately as ```site```. The covariates whose effects ComBat must preserve (e.g., age and sex) are selected in the same way (```harmonize_covariates```).
+
+Example of covariates structure for multi-site data:
+
+| Subject_ID  | Diagnosis | Site   | Age | Sex | TIV     |
+| ------------| ----------| -------|-----|-----| --------|
+| sub_0001    | 0         | Milan  | 54  | 0   | 1213.76 |
+| sub_0002    | 1         | Milan  | 37  | 1   | 1372.93 |
+| sub_0003    | 0         | London | 43  | 0   | 1285.88 |
+
+**External validation.** Create a single features file and a single covariates file including both training and validation subjects, in any order, and a file with the IDs of the training subjects (e.g., **training_ids.csv**), in a column with the same name as the ID column. The file with the training labels saved by script 02 (section 1) can be used. All the subjects that are not in the training list are used for validation.
 
 Example of data structure with validation set **(database_all.xlsx)**:
 
 | Subject_ID  | Diagnosis | Feature_01 | Feature_02 |
 | ------------| ----------| -----------| -----------|
-| sub001_tr   | 0         | 0.26649221 | 2.13888054 |
-| sub002_tr   | 1         | 0.32667590 | 0.67116539 |
-| sub001_ts   | 0         | 0.28786749 | 2.16871673 |
-| sub002_ts   | 0         | 0.26789256 | 2.13857829 |
+| sub_0001    | 0         | 0.26649221 | 2.13888054 |
+| sub_0101    | 0         | 0.28786749 | 2.16871673 |
+| sub_0002    | 1         | 0.32667590 | 0.67116539 |
+| sub_0102    | 0         | 0.26789256 | 2.13857829 |
 
-Example of covariates structure with validation set **(covariates_all.xlsx)**:
+Example of covariates structure with validation set **(covariates_all.xlsx)**, here with the site column for multi-site data:
 
-| Subject_ID  | Diagnosis | Age | Sex | TIV     |
-| ------------| ----------| ----|-----| --------|
-| sub001_tr   | 0         | 54  | 0   | 1213.76 |
-| sub002_tr   | 1         | 37  | 1   | 1372.93 |
-| sub001_ts   | 0         | 32  | 0   | 1224.77 |
-| sub002_ts   | 0         | 23  | 1   | 1224.91 |
+| Subject_ID  | Diagnosis | Site   | Age | Sex | TIV     |
+| ------------| ----------| -------|-----|-----| --------|
+| sub_0001    | 0         | Milan  | 54  | 0   | 1213.76 |
+| sub_0101    | 0         | Milan  | 32  | 0   | 1224.77 |
+| sub_0002    | 1         | London | 37  | 1   | 1372.93 |
+| sub_0102    | 0         | London | 23  | 1   | 1224.91 |
 
-Templates for both datasets are provided in the folder **NeuReval/example_data**.
+Example of list of training subjects **(training_ids.csv)**:
+
+| Subject_ID  |
+| ------------|
+| sub_0001    |
+| sub_0002    |
+
+For **hold-out validation with site harmonization**, the validation subjects must come from sites that are also in the training set. For **external validation in a new site**, also create a file with the IDs of the calibration subjects of the new site (e.g., **calibration_ids.csv**, same structure as training_ids.csv): they are used only to estimate the site effects of the new site and are excluded from the evaluation. They should be comparable to the training population (e.g., healthy controls in both).
+
+Templates for features and covariates files are provided in the folder **NeuReval/example_data** (without the optional site column).
 
 ### ii. Grid-search cross-validation for parameters' tuning <a name="Grid-search"></a>
 First, parameters for fixed classifier/clustering/preprocessing algorithms can be optimized through a grid-search cross-validation. This can be done with the ```ParamSelectionConfounds``` class:
@@ -253,7 +281,7 @@ An example of how to perform *NeuReval* can be found in the folder **NeuReval/sc
 - **03_visualization**: code to create a plot for clusters' representation
 
 ## 5. Notes <a name="Notes"></a>
-*NeuReval* was developed in Python 3.8.10 and tested on ubuntu 20.04. In case of any issues in running *NeuReval* on other operating systems (i.e., Windows), you can send an email at the following address: fcolombo.italia@gmail.com
+*NeuReval* was originally developed in Python 3.8.10 on Ubuntu 20.04; the current version requires Python 3.10 or later. In case of any issues in running *NeuReval* on other operating systems (i.e., Windows), you can send an email at the following address: fcolombo.italia@gmail.com
 
 ## 6. References <a name="References"></a>
 Fortin, J. P., Cullen, N., Sheline, Y. I., Taylor, W. D., Aselcioglu, I., Cook, P. A., ... & Shinohara, R. T. (2018). Harmonization of cortical thickness measurements across scanners and sites. _NeuroImage_, 167, 104-120.
