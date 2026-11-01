@@ -139,12 +139,16 @@ from neureval.utils import kuhn_munkres_algorithm
 
 # The code is organized in different sections for each kind of measures (i.e., silhouette score, Davies-Boudin score, AIC and BIC).
 # If you want to calculate only some scores, comment the ones you don't need
+# For a fair comparison, the internal measures use the same site harmonization as section 1 (site and
+# harmonize_covariates defined above; None = no harmonization). ComBat is estimated on all subjects,
+# as the internal measures are computed on the whole dataset.
 
 # SILHOUETTE SCORE
 # Use select_best to calcluate silhouette score. Specify silhouette_score as int_measure and 'max' as select parameter.
 # It returns silhouette score (sil_score), number of clusters selected (sil_best), and silhouette labels (sil_labels)
 logging.info("Silhouette score based selection")
-sil_score, sil_best, sil_label = select_best(data, modalities, covariates, c, silhouette_score, preprocessing=preproc, select='max', nclust_range=list(range(2,5)))
+sil_score, sil_best, sil_label = select_best(data, modalities, covariates, c, silhouette_score, preprocessing=preproc, select='max', nclust_range=list(range(2,5)),
+                                             site=site, harmonize_covariates=harmonize_covariates)
 
 logging.info(f"Best number of clusters (and scores): "
              f"{{{sil_best}({sil_score})}}")
@@ -167,7 +171,8 @@ pkl.dump(sil_results, open('./sil_results_model_name.pkl', 'wb'))
 # It returns davies-bouldin score (db_score), number of clusters selected (db_best), and davies-bouldin labels (db_labels)
 logging.info("Davies-Bouldin score based selection")
 db_score, db_best, db_label = select_best(data,modalities, covariates, c, davies_bouldin_score,preprocessing=preproc,
-                                                   select='min', nclust_range=list(range(2,5)))
+                                                   select='min', nclust_range=list(range(2,5)),
+                                                   site=site, harmonize_covariates=harmonize_covariates)
 
 logging.info(f"Best number of clusters (and scores): "
              f"{{{db_best}({db_score})}}")
@@ -189,7 +194,8 @@ pkl.dump(db_results, open('./db_results_model_name.pkl', 'wb'))
 # Calculate AIC score. Specify 'aic' as score parameter.
 # It returns AIC score (aic_score), number of clusters selected (aic_best), and AIC labels (aic_labels)
 logging.info("AIC score based selection")
-aic_score, aic_best, aic_label = select_best_bic_aic(data, modalities, covariates, c, score='aic', preprocessing=preproc, nclust_range=list(range(2,5)))
+aic_score, aic_best, aic_label = select_best_bic_aic(data, modalities, covariates, c, score='aic', preprocessing=preproc, nclust_range=list(range(2,5)),
+                                                     site=site, harmonize_covariates=harmonize_covariates)
 
 logging.info(f"Best number of clusters (and scores): "
               f"{{{aic_best}({aic_score})}}")
@@ -209,7 +215,8 @@ pkl.dump(aic_results, open('./aic_results_model_name.pkl', 'wb'))
 # Calculate BIC score. Specify 'bic' as score parameter.
 # It returns BIC score (bic_score), number of clusters selected (bic_best), and BIC labels (bic_labels)
 logging.info("BIC score based selection")
-bic_score, bic_best, bic_label = select_best_bic_aic(data, modalities, covariates, c, score='bic', preprocessing=preproc, nclust_range=list(range(2,6)))
+bic_score, bic_best, bic_label = select_best_bic_aic(data, modalities, covariates, c, score='bic', preprocessing=preproc, nclust_range=list(range(2,6)),
+                                                     site=site, harmonize_covariates=harmonize_covariates)
 
 logging.info(f"Best number of clusters (and scores): "
               f"{{{bic_best}({bic_score})}}")

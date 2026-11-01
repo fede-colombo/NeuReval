@@ -19,6 +19,8 @@ from sklearn.svm import SVC
 
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.param_selection_confounds import ParamSelectionConfounds
+from neureval.internal_baselines_confounds import select_best, select_best_bic_aic
+from sklearn.metrics import silhouette_score, davies_bouldin_score
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +162,29 @@ def case_evaluate_kmeans_pca():
                      PCA(n_components=5, random_state=42), 3)
 
 
+def case_internal_silhouette_gmm():
+    """Internal measure (silhouette) with GaussianMixture, as in section 2 of script 02."""
+    data, modalities, covariates = make_synthetic_data(cluster_std=10.0)
+    return to_plain(select_best(data, modalities, covariates, GaussianMixture(random_state=42),
+                                silhouette_score, select='max', nclust_range=list(range(2, 6))))
+
+
+def case_internal_davies_bouldin_kmeans_pca():
+    """Internal measure (Davies-Bouldin) with KMeans and PCA preprocessing."""
+    data, modalities, covariates = make_synthetic_data(cluster_std=10.0)
+    return to_plain(select_best(data, modalities, covariates, KMeans(n_init=10, random_state=42),
+                                davies_bouldin_score, preprocessing=PCA(n_components=5, random_state=42),
+                                select='min', nclust_range=list(range(2, 6))))
+
+
+def case_internal_bic_aic():
+    """BIC and AIC for Gaussian mixtures."""
+    data, modalities, covariates = make_synthetic_data(cluster_std=10.0)
+    return to_plain({score: select_best_bic_aic(data, modalities, covariates, GaussianMixture(random_state=42),
+                                                score=score, nclust_range=list(range(2, 6)))
+                     for score in ('bic', 'aic')})
+
+
 CASES = {
     'findbest_gmm': case_findbest_gmm,
     'findbest_kmeans_pca': case_findbest_kmeans_pca,
@@ -168,4 +193,7 @@ CASES = {
     'paramselection_pca': case_paramselection_pca,
     'evaluate_gmm': case_evaluate_gmm,
     'evaluate_kmeans_pca': case_evaluate_kmeans_pca,
+    'internal_silhouette_gmm': case_internal_silhouette_gmm,
+    'internal_davies_bouldin_kmeans_pca': case_internal_davies_bouldin_kmeans_pca,
+    'internal_bic_aic': case_internal_bic_aic,
 }
