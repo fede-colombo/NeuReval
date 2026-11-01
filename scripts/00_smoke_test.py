@@ -15,8 +15,9 @@ the data are noisy on purpose).
 It then checks site harmonization with ComBat on multi-site data (3 training sites and
 1 external site), where the site effects are larger than the differences between the
 clusters, following the same steps as scripts 01 and 02: grid search, cross-validation
-with the optimized parameters, hold-out validation (same sites) and external validation
-in the new site (calibrated on a separate calibration sample). With ComBat the clusters
+with the optimized parameters, internal measures for comparison (silhouette, BIC),
+hold-out validation (same sites) and external validation in the new site (calibrated
+on a separate calibration sample). With ComBat the clusters
 should follow the true clusters, not the sites.
 
 Run from the repository root:  python scripts/00_smoke_test.py
@@ -33,6 +34,8 @@ from neureval.param_selection_confounds import ParamSelectionConfounds
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.utils import load_table
 from neureval.metrics import agreement_metrics, cv_agreement_metrics
+from neureval.internal_baselines_confounds import select_best, select_best_bic_aic
+from sklearn.metrics import silhouette_score
 
 
 def make_multisite_data(rng):
@@ -148,7 +151,7 @@ def main():
     # Define classifier and clustering methods
     # n_init: several initializations of the Gaussian mixture, as in scripts 01 and 02 (with a single
     # one, the scikit-learn default, it can converge to a poor solution)
-    c = GaussianMixture(n_init=10, random_state=42)
+    c = GaussianMixture(n_init=3, random_state=42)
     s = SVC(random_state=42)
 
     # If you want to perform dimensionality reduction, uncomment the following line. Change the dimensionality reduction algorithm accordingly (e.g., UMAP, PCA)
@@ -248,7 +251,7 @@ def main():
 
     # Classifier and clustering methods with the parameters optimized with ComBat (as in script 02)
     cov_type, C_opt, kernel_opt = grid_best['ComBat'][0][:3]
-    c_ms = GaussianMixture(covariance_type=cov_type, n_init=10, random_state=42)
+    c_ms = GaussianMixture(covariance_type=cov_type, n_init=3, random_state=42)
     s_ms = SVC(C=C_opt, kernel=kernel_opt, random_state=42)
 
     # 5b. Cross-validation on sites A, B, C with the optimized parameters, without and with ComBat
@@ -261,9 +264,24 @@ def main():
         print(f'Cross-validation, {name}: {k_ms} clusters, ARI with true clusters {results[name][1]:.3f}, '
               f'ARI with sites {results[name][2]:.3f}')
     print('(without harmonization the clusters tend to follow the sites, with ComBat the true clusters)')
+
+    # 5c. Internal measures for comparison (as in section 2 of script 02), without and with ComBat
+    internal = {}
+    for name, kw in harmonization_settings:
+        _, k_sil, lab_sil = select_best(d_abc, m_abc, c_abc, c_ms, silhouette_score, select='max',
+                                        nclust_range=list(range(2, 6)), **kw)
+        _, k_bic, lab_bic = select_best_bic_aic(d_abc, m_abc, c_abc, c_ms, score='bic',
+                                                nclust_range=list(range(2, 6)), **kw)
+        internal[name] = {'silhouette': (k_sil, adjusted_rand_score(y_ms[abc], lab_sil),
+                                         adjusted_rand_score(s_abc, lab_sil)),
+                          'BIC': (k_bic, adjusted_rand_score(y_ms[abc], lab_bic),
+                                  adjusted_rand_score(s_abc, lab_bic))}
+        for measure, (k_m, ari_true, ari_site) in internal[name].items():
+            print(f'Internal measure {measure}, {name}: {k_m} clusters, ARI with true clusters {ari_true:.3f}, '
+                  f'ARI with sites {ari_site:.3f}')
     findbest_ms = FindBestClustCVConfounds(c_ms, s_ms, preprocessing=None, nrand=10)
 
-    # 5c. Hold-out validation in the same sites: 2/3 training, 1/3 hold-out, identified by IDs
+    # 5d. Hold-out validation in the same sites: 2/3 training, 1/3 hold-out, identified by IDs
     training_ids = pd.Series(np.random.default_rng(2).choice(ms_cov['Subject_ID'][abc], size=240, replace=False))
     tr_ms = ms_cov['Subject_ID'].isin(training_ids).to_numpy()
     val_ms = abc & ~tr_ms
@@ -273,7 +291,7 @@ def main():
     print(f'Hold-out validation (same sites), ComBat: normalized stability {out_ho.test_stability:.3f}, '
           f'ARI between assigned and true clusters {ari_ho:.3f}')
 
-    # 5d. External validation in site D: training on all subjects of A, B, C;
+    # 5e. External validation in site D: training on all subjects of A, B, C;
     # 50 subjects of D for calibration only, the other 100 evaluated
     d_ids = ms_cov['Subject_ID'][site == 'D']
     calibration_idx = ms_cov['Subject_ID'].isin(d_ids.iloc[:50]).to_numpy()
@@ -298,6 +316,8 @@ def main():
         'ComBat: 3 clusters in cross-validation': results['ComBat'][0] == 3,
         'ComBat: clusters follow the true clusters': results['ComBat'][1] > 0.5,
         'ComBat: clusters do not follow the sites': abs(results['ComBat'][2]) < 0.2,
+        'ComBat: silhouette clusters follow the true clusters': internal['ComBat']['silhouette'][1] > 0.5,
+        'ComBat: internal measures do not follow the sites': all(abs(v[2]) < 0.2 for v in internal['ComBat'].values()),
         'ComBat: hold-out subjects assigned to the right clusters': ari_ho > 0.5,
         'ComBat: error for an external site without calibration': unseen_site_error,
         'ComBat: external subjects assigned to the right clusters': ari_ext > 0.5,
