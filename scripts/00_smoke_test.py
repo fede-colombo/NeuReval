@@ -26,6 +26,14 @@ subject in the same fold), hold-out validation of new subjects identified by the
 and the overestimation of stability that occurs when the rows of a subject are split
 between training and validation folds.
 
+Last, it follows script 04_longitudinal_states.py on simulated counts of 3 types of events
+in 5 time windows: composition of the counts, a reference state for windows without
+counts, states found with NeuReval in the training subjects, sequences and transitions,
+the table for the regression of the transitions, validation of the states in new
+subjects, and clusters of the sequences of states. It then follows script
+05_longitudinal_trajectories.py: subjects clustered by the shape of their trajectories over
+time (early, middle or late peak), which differ much more in their overall level.
+
 Run from the repository root:  python scripts/00_smoke_test.py
 """
 import os
@@ -42,6 +50,10 @@ from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.utils import load_table
 from neureval.metrics import agreement_metrics, cv_agreement_metrics
 from neureval.internal_baselines_confounds import select_best, select_best_bic_aic
+from neureval.longitudinal import (composition_features, select_rows, add_reference_state,
+                                   state_sequences, transition_matrices, transition_table,
+                                   sequence_features, sequence_profiles, to_wide, level_shape_features)
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import silhouette_score
 
 
@@ -119,6 +131,53 @@ def make_longitudinal_data(rng, n_subjects=150, n_windows=4, states=True):
     data.insert(0, 'Subject_ID', ids)
     cov = pd.DataFrame({'Subject_ID': ids, 'Window': window[keep], 'Sex': sex[keep]})
     return data, cov
+
+
+def make_count_data(rng, n_subjects=300, n_windows=5):
+    """
+    Longitudinal counts in long format, as expected by script 04: counts of 3 types of events
+    (Respiratory, Ear, Gastro) in each time window, for each subject (about 10% of the windows
+    missing). True states: 0 = no events, 1 = mostly respiratory, 2 = mostly ear, 3 = mostly
+    gastro. States persist over time, and the probability of no events increases with age.
+    The persistence of state 1 increases with PRS.
+    """
+    lam = {0: [0, 0, 0], 1: [6, 1, 0.5], 2: [1, 5, 0.5], 3: [0.5, 0.5, 5]}
+    prs = rng.normal(0, 1, n_subjects)
+    sex = rng.integers(0, 2, n_subjects)
+    state = np.zeros((n_subjects, n_windows), dtype=int)
+    state[:, 0] = rng.choice(4, n_subjects, p=[0.2, 0.3, 0.35, 0.15])
+    for w in range(1, n_windows):
+        for i in range(n_subjects):
+            logit = np.zeros(4)
+            logit[state[i, w - 1]] += 1.5 + (0.8 * prs[i] if state[i, w - 1] == 1 else 0)
+            logit[0] += 0.3 * w
+            state[i, w] = rng.choice(4, p=np.exp(logit) / np.exp(logit).sum())
+    rows = []
+    for i in range(n_subjects):
+        for w in range(n_windows):
+            if rng.random() < 0.1:
+                continue                      # window without follow-up: no row
+            rows.append([f'sub-{i:04d}', w + 1, *rng.poisson(lam[state[i, w]]), sex[i], state[i, w]])
+    counts = pd.DataFrame(rows, columns=['Subject_ID', 'Window', 'Respiratory', 'Ear', 'Gastro', 'Sex', 'True_state'])
+    subject_data = pd.DataFrame({'PRS': prs, 'Sex': sex}, index=[f'sub-{i:04d}' for i in range(n_subjects)])
+    return counts, subject_data
+
+
+def make_trajectory_data(rng, n_subjects=300, n_windows=5):
+    """
+    Counts in long format (Subject_ID, Window, Count; about 10% of the windows missing) with 3
+    true shapes over time (peak in the first, middle or last windows) and a subject-specific
+    level (multiplicative, SD of the log 0.7) that varies much more than the shapes.
+    """
+    shapes = np.array([[3, 2, 1, .5, .5], [.5, 1.5, 3, 1.5, .5], [.5, .5, 1, 2, 3]])
+    shape = rng.integers(0, 3, n_subjects)
+    mult = np.exp(rng.normal(0, 0.7, n_subjects))
+    rows = [[f'sub-{i:04d}', w + 1, rng.poisson(4 * shapes[shape[i], w] * mult[i])]
+            for i in range(n_subjects) for w in range(n_windows) if rng.random() >= 0.1]
+    counts = pd.DataFrame(rows, columns=['Subject_ID', 'Window', 'Count'])
+    subject_data = pd.DataFrame({'Sex': rng.integers(0, 2, n_subjects), 'True_shape': shape},
+                                index=[f'sub-{i:04d}' for i in range(n_subjects)])
+    return counts, subject_data
 
 
 def main():
@@ -438,6 +497,104 @@ def main():
         'Groups: stability overestimated when rows are split': null_stab['rows split'] < null_stab['subjects together'],
         'Groups: hold-out rows assigned to the right states': ari_lg_ho > 0.5,
         'Groups: error for a subject in both sets': split_error,
+    })
+    # 7. Longitudinal states and transitions, as in script 04_longitudinal_states.py
+    print('\nLongitudinal counts: states and transitions (script 04)')
+    counts, subject_data = make_count_data(np.random.default_rng(6))
+    ids, window, true_state = counts['Subject_ID'].to_numpy(), counts['Window'].to_numpy(), counts['True_state'].to_numpy()
+    training_ids = pd.Series(np.random.default_rng(7).choice(subject_data.index, size=200, replace=False))
+    training = np.isin(ids, training_ids)
+
+    # 7a. Composition of the counts and reference state for windows without counts (section 1)
+    features = composition_features(counts[['Respiratory', 'Ear', 'Gastro']])
+    informative = features.notna().all(axis=1).to_numpy()
+    cov_long = pd.concat([counts[['Sex']].astype(float),
+                          pd.get_dummies(counts['Window'], prefix='Window', drop_first=True, dtype=float)], axis=1)
+    feat_tr, cov_tr, ids_tr = select_rows(informative & training, features, cov_long, ids)
+    print(f'{len(counts)} rows ({(~informative).sum()} without counts), {len(subject_data)} subjects, '
+          f'{len(np.unique(ids[training]))} for training')
+
+    # 7b. States with NeuReval in the training subjects (section 2)
+    fb_st = FindBestClustCVConfounds(GaussianMixture(n_init=3, random_state=42), LogisticRegression(max_iter=1000),
+                                     preprocessing=None, nfold=2, nrand=10, n_jobs=1, nclust_range=list(range(2, 6)))
+    m_st, k_st, lab_st = fb_st.best_nclust_confounds(feat_tr, {'counts': feat_tr}, {'counts': cov_tr}, iter_cv=2,
+                                                     groups=ids_tr)
+    states_tr = add_reference_state(lab_st, informative[training])
+    ari_st = adjusted_rand_score(true_state[training], states_tr)
+    print(f'States: {k_st} (expected 3, plus state 0 for no counts), normalized stability '
+          f'{m_st["val"][k_st][0]:.3f}, ARI with the true states {ari_st:.3f}')
+
+    # 7c. Sequences, transitions and table for the regression (sections 4 and 5)
+    seq = state_sequences(ids[training], window[training], states_tr)
+    trans_n = transition_matrices(ids[training], window[training], states_tr, normalize=False)
+    trans_p = transition_matrices(ids[training], window[training], states_tr)
+    table = transition_table(ids[training], window[training], states_tr, subject_data=subject_data)
+    persistence = np.diag(trans_p['all'].to_numpy())
+    print(f'Sequences: {seq.shape[0]} subjects x {seq.shape[1]} windows; transitions: {len(table)}; '
+          f'persistence of each state: {np.round(persistence, 2).tolist()}')
+
+    # 7d. Validation of the states in new subjects, with the state numbers of the training (section 6)
+    feat_all, cov_all, ids_all = select_rows(informative, features, cov_long, ids)
+    tr_st = training[informative]
+    out_st = fb_st.evaluate_confounds(feat_all, {'counts': feat_all}, {'counts': cov_all}, tr_st, ~tr_st,
+                                      nclust=k_st, tr_lab=lab_st, groups=ids_all)
+    states_ho = add_reference_state(out_st.test_classlab, informative[~training])
+    ari_ho_st = adjusted_rand_score(true_state[~training], states_ho)
+    persistence_ho = np.diag(transition_matrices(ids[~training], window[~training], states_ho)['all'].to_numpy())
+    print(f'Hold-out (new subjects): normalized stability {out_st.test_stability:.3f}, ARI with the true states '
+          f'{ari_ho_st:.3f}, persistence of each state: {np.round(persistence_ho, 2).tolist()}')
+
+    # 7e. Clusters of sequences of states (section 7). In these data the states follow a Markov chain, without
+    # distinct types of sequences: the check is that the analysis runs and describes every cluster.
+    seq_feat = sequence_features(seq, encoding='onehot', max_missing=1)
+    X_seq = seq_feat.reset_index(drop=True)
+    seq_cov = subject_data.loc[seq_feat.index, ['Sex']].astype(float).reset_index(drop=True)
+    fb_seq = FindBestClustCVConfounds(KMeans(n_init=10, random_state=42), LogisticRegression(max_iter=1000),
+                                      preprocessing=None, nfold=2, nrand=10, n_jobs=1, nclust_range=list(range(2, 5)))
+    m_seq, k_seq, lab_seq = fb_seq.best_nclust_confounds(X_seq, {'sequences': X_seq}, {'sequences': seq_cov}, iter_cv=2)
+    profiles = sequence_profiles(seq, pd.Series(lab_seq, index=seq_feat.index))
+    print(f'Clusters of sequences: {len(seq_feat)} subjects, {k_seq} clusters, normalized stability '
+          f'{m_seq["val"][k_seq][0]:.3f}')
+
+    # Each true state gets the same state number in the training and in the hold-out subjects
+    same_numbers = all(pd.Series(states_tr[true_state[training] == t]).mode()[0] ==
+                       pd.Series(states_ho[true_state[~training] == t]).mode()[0] for t in range(4))
+    checks.update({
+        'Longitudinal: 3 states with counts': k_st == 3,
+        'Longitudinal: states follow the true states': ari_st > 0.8,
+        'Longitudinal: transition table consistent with the matrices': len(table) == trans_n['all'].to_numpy().sum(),
+        'Longitudinal: hold-out subjects assigned to the right states': ari_ho_st > 0.8,
+        'Longitudinal: same state numbers in training and hold-out': same_numbers,
+        'Longitudinal: profiles of every cluster of sequences in every window':
+            len(profiles) == k_seq * seq.shape[1],
+    })
+    # 8. Trajectories: level and shape (script 05_longitudinal_trajectories.py)
+    print('\nTrajectories: clusters of the shape over time (script 05)')
+    tr_counts, tr_subj = make_trajectory_data(np.random.default_rng(8))
+    wide = np.log1p(to_wide(tr_counts['Subject_ID'], tr_counts['Window'], tr_counts['Count']))
+    ls = level_shape_features(wide, degree=2).dropna()
+    true_shape = tr_subj.loc[ls.index, 'True_shape'].to_numpy()
+    sex_traj = tr_subj.loc[ls.index, ['Sex']].astype(float).reset_index(drop=True)
+    traj_results = {}
+    # Without decomposition: log(1 + count) in each window (missing windows: mean of the subject)
+    raw = wide.loc[ls.index].apply(lambda row: row.fillna(row.mean()), axis=1).reset_index(drop=True)
+    for name, X in (('windows', raw), ('shape', ls[['linear', 'quadratic']].reset_index(drop=True))):
+        fb_traj = FindBestClustCVConfounds(GaussianMixture(n_init=3, random_state=42), LogisticRegression(max_iter=1000),
+                                           preprocessing=None, nfold=2, nrand=10, n_jobs=1,
+                                           nclust_range=list(range(2, 6)))
+        m_traj, k_traj, lab_traj = fb_traj.best_nclust_confounds(X, {'traj': X}, {'traj': sex_traj}, iter_cv=2)
+        ari_shape_true = adjusted_rand_score(true_shape, lab_traj)
+        ari_level = adjusted_rand_score(pd.qcut(ls['level'], k_traj, labels=False), lab_traj)
+        traj_results[name] = (k_traj, ari_shape_true, ari_level)
+        print(f'Clustering of the {name}: {k_traj} clusters, normalized stability {m_traj["val"][k_traj][0]:.3f}, '
+              f'ARI with the true shapes {ari_shape_true:.3f}, ARI with groups of overall level {ari_level:.3f}')
+    print('(the windows mix shape and level; the shape finds the 3 shapes, independently of the level)')
+
+    checks.update({
+        'Trajectories: 3 clusters of the shape': traj_results['shape'][0] == 3,
+        'Trajectories: shape clusters follow the true shapes': traj_results['shape'][1] > 0.8,
+        'Trajectories: shape clusters independent of the level': abs(traj_results['shape'][2]) < 0.1,
+        'Trajectories: shape closer to the true shapes than the windows': traj_results['shape'][1] > traj_results['windows'][1],
     })
     failed = [name for name, ok in checks.items() if not ok]
     print('\nSMOKE TEST PASSED' if not failed else f'\nWARNING: unexpected {", ".join(failed)}')
