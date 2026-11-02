@@ -4,7 +4,7 @@
          IRCCS San Raffaele Scientific Institute, Milan, Italy
 """
 
-from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
+from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold, StratifiedGroupKFold
 from neureval.relative_validation_confounds import RelativeValidationConfounds
 from neureval.harmonization import _check_harmonization_inputs
 from collections import namedtuple
@@ -25,7 +25,7 @@ logging.basicConfig(format='%(asctime)s, %(levelname)s %(message)s',
 
 
 def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_vect=None, n_jobs=1,
-                   site=None, harmonize_covariates=None):
+                   site=None, harmonize_covariates=None, groups=None):
     """
     Generate the (repeated) cross-validation folds and prepare the data of each
     fold once (confound correction and, if specified, preprocessing) with
@@ -52,16 +52,20 @@ def _prepare_folds(reval, data, modalities, covariates, nfold, iter_cv=1, strat_
     :type site: array-like
     :param harmonize_covariates: covariates whose effects the harmonization must preserve.
     :type harmonize_covariates: DataFrame, dictionary or None
+    :param groups: group of each row (e.g. subject ID when a subject has several rows, as in
+        longitudinal data). If given, the rows of a group are never split between training
+        and validation folds. Default None.
+    :type groups: array-like, (n_samples,)
     :return: one tuple (train indices, validation indices, prepared training data,
         prepared validation data) for each fold.
     :rtype: list
     """
     return _prepare_folds_multi([reval], data, modalities, covariates, nfold,
-                                iter_cv, strat_vect, n_jobs, site, harmonize_covariates)[0]
+                                iter_cv, strat_vect, n_jobs, site, harmonize_covariates, groups)[0]
 
 
 def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
-                         strat_vect=None, n_jobs=1, site=None, harmonize_covariates=None):
+                         strat_vect=None, n_jobs=1, site=None, harmonize_covariates=None, groups=None):
     """
     Same as :func:`_prepare_folds` for several `RelativeValidationConfounds` objects
     (e.g. one for each combination of preprocessing parameters), on the same folds.
@@ -74,11 +78,7 @@ def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
         # With harmonization every site must be in every training fold: stratify by site
         strat_vect = np.asarray(site)
         logging.info("Site harmonization: cross-validation folds stratified by site.")
-    if strat_vect is not None:
-        kfold = RepeatedStratifiedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
-    else:
-        kfold = RepeatedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=42)
-    splits = list(kfold.split(data, strat_vect))
+    splits = _make_splits(len(data), nfold, iter_cv, strat_vect, groups)
     jobs = [(reval, tr_idx, val_idx) for reval in revals for tr_idx, val_idx in splits]
     if n_jobs > 1 and len(jobs) > 1:
         prepared = Parallel(n_jobs=n_jobs)(
@@ -89,6 +89,95 @@ def _prepare_folds_multi(revals, data, modalities, covariates, nfold, iter_cv=1,
                     for reval, tr_idx, val_idx in jobs]
     n = len(splits)
     return [prepared[i * n:(i + 1) * n] for i in range(len(revals))]
+
+
+def _make_splits(n_samples, nfold, iter_cv=1, strat_vect=None, groups=None, random_state=42):
+    """
+    Generate the (repeated) cross-validation splits.
+
+    Without groups, each row is split independently (stratified by `strat_vect` if given).
+    With groups, all the rows of a group (e.g. all the time points of a subject) are kept
+    in the same fold, so that a subject is never in both the training and the validation
+    fold: otherwise the classifier would be evaluated on rows of subjects it has already
+    seen, and the stability would be overestimated.
+
+    :param n_samples: number of rows.
+    :type n_samples: int
+    :param nfold: number of folds.
+    :type nfold: int
+    :param iter_cv: number of repetitions, each with a different random split.
+    :type iter_cv: int
+    :param strat_vect: vector for stratification, default None.
+    :type strat_vect: array-like, (n_samples,)
+    :param groups: group of each row, default None.
+    :type groups: array-like, (n_samples,)
+    :param random_state: seed of the random splits.
+    :type random_state: int
+    :return: list of (training row positions, validation row positions), iter_cv * nfold splits.
+    :rtype: list
+    """
+    if groups is None:
+        if strat_vect is not None:
+            kfold = RepeatedStratifiedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=random_state)
+        else:
+            kfold = RepeatedKFold(n_splits=nfold, n_repeats=iter_cv, random_state=random_state)
+        return list(kfold.split(np.zeros(n_samples), strat_vect))
+
+    groups = _check_groups(groups, n_samples, nfold)
+    logging.info(f"Cross-validation folds keep together the rows of each group "
+                 f"({len(np.unique(groups))} groups, {n_samples} rows).")
+    rng = np.random.RandomState(random_state)
+    splits = []
+    for _ in range(iter_cv):
+        seed = rng.randint(np.iinfo(np.int32).max)
+        if strat_vect is not None:
+            kfold = StratifiedGroupKFold(n_splits=nfold, shuffle=True, random_state=seed)
+            splits.extend(kfold.split(np.zeros(n_samples), np.asarray(strat_vect), groups))
+        else:
+            splits.extend(_shuffled_group_kfold(groups, nfold, seed))
+    return splits
+
+
+def _shuffled_group_kfold(groups, nfold, seed):
+    """
+    K-fold split of groups in random order (a different split for each seed), with folds of
+    similar size: groups are assigned, from the largest to the smallest (random order among
+    groups of the same size), to the fold with the fewest rows so far.
+
+    :return: list of (training row positions, validation row positions), one per fold.
+    :rtype: list
+    """
+    uniq, inverse, counts = np.unique(groups, return_inverse=True, return_counts=True)
+    order = np.random.RandomState(seed).permutation(len(uniq))
+    order = order[np.argsort(-counts[order], kind='stable')]
+    fold_rows = np.zeros(nfold, dtype=int)
+    fold_of_group = np.empty(len(uniq), dtype=int)
+    for g in order:
+        f = int(np.argmin(fold_rows))
+        fold_of_group[g] = f
+        fold_rows[f] += counts[g]
+    fold_of_row = fold_of_group[inverse]
+    return [(np.flatnonzero(fold_of_row != f), np.flatnonzero(fold_of_row == f)) for f in range(nfold)]
+
+
+def _check_groups(groups, n_samples, nfold=None):
+    """
+    Check the group of each row: one value per row, no missing values and, if nfold is
+    given, at least nfold groups.
+
+    :return: groups as a one-dimensional array.
+    :rtype: ndarray
+    """
+    groups = np.asarray(groups)
+    if groups.ndim != 1 or len(groups) != n_samples:
+        raise ValueError(f"groups must have one value per row: got {groups.shape}, expected ({n_samples},).")
+    if pd.isna(groups).any():
+        raise ValueError("groups contains missing values: every row needs a group (e.g. its subject ID).")
+    n_groups = len(np.unique(groups))
+    if nfold is not None and n_groups < nfold:
+        raise ValueError(f"groups has {n_groups} distinct values, fewer than the {nfold} cross-validation "
+                         f"folds: each fold needs at least one group.")
+    return groups
 
 
 def _prepare_one(reval, modalities, covariates, tr_idx, val_idx, site=None, harmonize_covariates=None):
@@ -145,7 +234,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
         self.nclust_range = nclust_range
 
     def best_nclust_confounds(self, data, modalities, covariates, iter_cv=1, strat_vect=None,
-                              prepared_folds=None, site=None, harmonize_covariates=None):
+                              prepared_folds=None, site=None, harmonize_covariates=None, groups=None):
         """
         This method takes as input the training dataset and the
         stratification vector (if available) and performs a
@@ -176,6 +265,13 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             (e.g. age, sex): one table for all modalities, or a dictionary with one table per
             modality (same keys as `modalities`). Default None.
         :type harmonize_covariates: DataFrame, dictionary or None
+        :param groups: group of each row, for data with several rows per subject (e.g.
+            longitudinal data in long format, one row per subject and time point): give the
+            subject ID of each row. All the rows of a subject are then kept in the same fold,
+            so that the validation fold contains only subjects not seen in training. Can be
+            combined with `strat_vect` (or `site`): the folds are then stratified as far as
+            possible while keeping the groups together. Default None (each row is a subject).
+        :type groups: array-like, (n_samples,)
         :return: CV metrics for training and validation sets, best number of clusters,
             misclassification errors at each CV iteration.
         :rtype: dictionary, int, (list) if n_clusters parameter is not available
@@ -191,7 +287,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
                                         harmonize_covariates)
             prepared_folds = _prepare_folds(reval, data, modalities, covariates,
                                            self.nfold, iter_cv, strat_vect, self.n_jobs,
-                                           site, harmonize_covariates)
+                                           site, harmonize_covariates, groups)
         params = self._make_tasks(reval, prepared_folds)
         out = _run_tasks(params, self.n_jobs)
         return self._aggregate_results(params, out)
@@ -281,7 +377,7 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             return metrics, bestncl, tr_lab
     
     def evaluate_confounds(self, data, modalities, covariates, tr_idx, val_idx, nclust=None, tr_lab=None,
-                           site=None, harmonize_covariates=None, calibration_idx=None):
+                           site=None, harmonize_covariates=None, calibration_idx=None, groups=None):
         """
         External validation: tests whether the clustering solution found in the training
         set replicates in a validation (hold-out or external) set.
@@ -331,6 +427,11 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             both), otherwise real differences between populations are removed as site effects.
             Integer row positions or boolean mask. Default None.
         :type calibration_idx: array-like
+        :param groups: group of each row (e.g. subject ID), for data with several rows per
+            subject. If given, an error is raised when a group has rows in both the training and
+            the validation (or calibration) set: the validation set must contain only subjects
+            not used in training. Default None.
+        :type groups: array-like, (n_samples,)
         :return: namedtuple with fields
 
             - train_cllab: clustering labels of the training subjects;
@@ -358,6 +459,13 @@ class FindBestClustCVConfounds(RelativeValidationConfounds):
             raise ValueError(f"{len(overlap)} subject(s) are in both the training and the validation set "
                              f"(row positions {overlap[:10].tolist()}{'...' if len(overlap) > 10 else ''}). "
                              f"The two sets must not overlap.")
+        if groups is not None:
+            groups = _check_groups(groups, n_samples)
+            _check_groups_disjoint(groups, tr_idx, val_idx, 'validation')
+            if calibration_idx is not None:
+                _check_groups_disjoint(groups, tr_idx,
+                                       _check_indices(calibration_idx, n_samples, 'calibration_idx'),
+                                       'calibration')
         if tr_lab is not None:
             tr_lab = np.asarray(tr_lab)
             if len(tr_lab) != len(tr_idx):
@@ -508,6 +616,15 @@ def _check_indices(idx, n_samples, name):
     if len(np.unique(idx)) != len(idx):
         raise ValueError(f"{name} contains duplicated row positions.")
     return idx
+
+
+def _check_groups_disjoint(groups, tr_idx, other_idx, name):
+    """Raise an error if a group has rows both in the training set and in another set."""
+    shared = np.intersect1d(groups[tr_idx], groups[other_idx])
+    if len(shared) > 0:
+        raise ValueError(f"{len(shared)} group(s) have rows in both the training and the {name} set "
+                         f"(e.g. {shared[:5].tolist()}): all the rows of a subject must be in the "
+                         f"same set.")
 
 
 def _check_n_jobs(n_jobs):
