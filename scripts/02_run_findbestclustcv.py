@@ -72,6 +72,18 @@ site = None
 harmonize_covariates = None
 # harmonize_covariates = cov[['Age', 'Sex']]   # or a dictionary with one table per modality
 
+# Several rows per subject (optional), e.g. longitudinal data in long format with one row per subject
+# and time window. Specify the column with the subject ID: all the rows of a subject are kept in the
+# same cross-validation fold, so that the validation folds contain only subjects not seen in training.
+# Use the same setting as in 01_grid_search.py. Leave group_col = None when each row is a different subject.
+# In long format, add the time window to the covariates of each modality as dummy variables, so that the
+# confound correction removes the average differences between ages, e.g.
+# window_dummies = pd.get_dummies(cov['Window'], prefix='Window', drop_first=True, dtype=float)
+# covariates = {'feature_01': pd.concat([cov[['Sex']], window_dummies], axis=1), ...}
+group_col = None
+# group_col = 'Subject_ID'
+groups = data[group_col].to_numpy() if group_col is not None else None
+
 # Define clusteirng and classifier algortihms with optimized parameters
 # n_init: number of initializations of the Gaussian mixture (more stable results than a single one)
 s = SVC(C=1, kernel='rbf', random_state=42)
@@ -94,8 +106,10 @@ findbestclust = FindBestClustCVConfounds(c,s, preprocessing=preproc, nfold=2, nr
 # iter_cv: number of repeated cross-validation, default 1
 # strat_vect: stratification vector for cross-validation splits, default None (stratified by site if site is given)
 # site, harmonize_covariates: site harmonization with ComBat (see above), default None
+# groups: subject ID of each row for data with several rows per subject (see above), default None
 metrics, bestncl, tr_lab = findbestclust.best_nclust_confounds(data, modalities, covariates, iter_cv=10, strat_vect=None,
-                                                               site=site, harmonize_covariates=harmonize_covariates)
+                                                               site=site, harmonize_covariates=harmonize_covariates,
+                                                               groups=groups)
 val_results = list(metrics['val'].values())
 val_results = np.array(val_results, dtype=object)
 
@@ -142,6 +156,8 @@ from neureval.utils import kuhn_munkres_algorithm
 # For a fair comparison, the internal measures use the same site harmonization as section 1 (site and
 # harmonize_covariates defined above; None = no harmonization). ComBat is estimated on all subjects,
 # as the internal measures are computed on the whole dataset.
+# With several rows per subject (group_col), the internal measures treat each row as an observation: they do
+# not use cross-validation, so they need no groups.
 
 # SILHOUETTE SCORE
 # Use select_best to calcluate silhouette score. Specify silhouette_score as int_measure and 'max' as select parameter.
@@ -260,6 +276,10 @@ os.chdir(out_dir)
 
 # Name of the column with the subjects' IDs (the same in all files, e.g. 'Subject_ID' or 'IDNUM')
 id_col = 'Subject_ID'
+# Several rows per subject (e.g. longitudinal data in long format, one row per subject and time window):
+# set long_format = True. id_col then identifies the subject, all the rows of a training subject are in the
+# training set, and an error is raised if a subject has rows in both the training and the hold-out set.
+long_format = False
 
 # Import the complete data and covariates files (training + hold-out subjects, in any order).
 # The covariates file must contain the same subjects, in the same order as the data file.
@@ -276,6 +296,8 @@ if not data_all[id_col].equals(cov_all[id_col]):
 # For example, the file with the training labels saved in section 1 ('Labels_model_name_training.csv') can be used.
 training_ids_file = 'training_ids.csv'
 training_ids = load_table(os.path.join(data_path, training_ids_file))[id_col]
+if long_format:
+    training_ids = training_ids.drop_duplicates()   # e.g. the labels file has one row per subject and window
 
 missing = training_ids[~training_ids.isin(data_all[id_col])]
 if len(missing) > 0:
@@ -286,6 +308,7 @@ if training_ids.duplicated().any():
 # Training and hold-out sets as boolean masks (True = subject belongs to the set)
 tr_idx = data_all[id_col].isin(training_ids).to_numpy()
 val_idx = ~tr_idx
+groups = data_all[id_col].to_numpy() if long_format else None
 
 # Site harmonization with ComBat (optional), estimated on the training subjects only.
 # - Hold-out validation: the hold-out subjects come from the same sites as the training subjects.
@@ -344,10 +367,11 @@ bestncl = 3
 # nclust: best number of clusters identified in the training dataset (i.e., bestncl)
 # tr_lab: clustering labels for the training set. If not None, the clustering algorithm is not performed and the classifier is fitted. Default None
 # site, harmonize_covariates, calibration_idx: site harmonization with ComBat (see above), default None
+# groups: subject ID of each row in long format (see above), default None
 out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx,
                                        nclust=bestncl, tr_lab=None, site=site,
                                        harmonize_covariates=harmonize_covariates,
-                                       calibration_idx=calibration_idx)
+                                       calibration_idx=calibration_idx, groups=groups)
 if out is None:
     raise Exception('No clusters were identified in the training or hold-out set')
 
@@ -373,6 +397,7 @@ val_cm.to_csv('Val_confusion_matrix_model_name.csv')
 # Save the labels of the hold-out subjects:
 # - Holdout_clustering_labels: independent clustering of the hold-out set, matched to the training clusters
 # - Assigned_training_cluster: training cluster assigned to each hold-out subject by the classifier
+# In long format, also add the time window of each row, e.g. 'Window': cov_all['Window'][val_idx].to_numpy()
 labels_val = pd.DataFrame({id_col: data_all[id_col][val_idx].to_numpy(),
                            'Holdout_clustering_labels': out.test_cllab,
                            'Assigned_training_cluster': out.test_classlab})

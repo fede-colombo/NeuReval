@@ -12,6 +12,7 @@ A stability-based relative clustering validation method to determine the best nu
     5. [External validation](#Validation)
     6. [Agreement metrics](#Metrics)
     7. [Site harmonization with ComBat](#Harmonization)
+    8. [Several rows per subject (longitudinal data)](#Groups)
 4. [Example](#Example)
 5. [Notes](#Notes)
 6. [References](#References)
@@ -51,7 +52,7 @@ pytest tests/
 
 ## 3. How to use NeuReval <a name="Use"></a>
 ### i. Input structure <a name="Input"></a>
-*NeuReval* requires two files, one with the input features and one with the covariates, with one row per subject and the subjects in the same order in both files. Files can be CSV (.csv) or Excel (.xlsx, .xls) and are read with ```neureval.utils.load_table```.
+*NeuReval* requires two files, one with the input features and one with the covariates, with one row per subject (or one row per subject and time point, see [Several rows per subject](#Groups) below) and the rows in the same order in both files. Files can be CSV (.csv) or Excel (.xlsx, .xls) and are read with ```neureval.utils.load_table```.
 
 for database with **input features (database.xlsx)**:
 - First column: subject ID
@@ -91,6 +92,28 @@ Example of covariates structure for multi-site data:
 | sub_0002    | 1         | Milan  | 37  | 1   | 1372.93 |
 | sub_0003    | 0         | London | 43  | 0   | 1285.88 |
 
+**Several rows per subject** (e.g. longitudinal data in long format, one row per subject and time point; see [Several rows per subject](#Groups)). Each row of both files is a subject at one time point: the subject ID is repeated on each row of the subject, and subjects with missing time points have fewer rows (do not add empty rows). Add a column with the time point (e.g. age window) to the covariates file. The time point is not a feature: to remove the average differences between time points, add it to the covariates dictionary as dummy variables (e.g. ```pd.get_dummies(cov['Window'], prefix='Window', drop_first=True, dtype=float)```, see the scripts). Pass the subject ID column as ```groups```, so that all the rows of a subject are kept in the same cross-validation fold (```group_col``` in scripts 01 and 02).
+
+Example of database structure for input features with several rows per subject:
+
+| Subject_ID  | Diagnosis | Feature_01 | Feature_02 |
+| ------------| ----------| -----------| -----------|
+| sub_0001    | 0         | 0.26649221 | 2.13888054 |
+| sub_0001    | 0         | 0.27801345 | 2.10457211 |
+| sub_0001    | 0         | 0.25433902 | 2.20915630 |
+| sub_0002    | 1         | 0.32667590 | 0.67116539 |
+| sub_0002    | 1         | 0.33015478 | 0.70213846 |
+
+Example of covariates structure with several rows per subject (sub_0002 has no data for window 3):
+
+| Subject_ID  | Diagnosis | Window | Sex |
+| ------------| ----------| -------|-----|
+| sub_0001    | 0         | 1      | 0   |
+| sub_0001    | 0         | 2      | 0   |
+| sub_0001    | 0         | 3      | 0   |
+| sub_0002    | 1         | 1      | 1   |
+| sub_0002    | 1         | 2      | 1   |
+
 **External validation.** Create a single features file and a single covariates file including both training and validation subjects, in any order, and a file with the IDs of the training subjects (e.g., **training_ids.csv**), in a column with the same name as the ID column. The file with the training labels saved by script 02 (section 1) can be used. All the subjects that are not in the training list are used for validation.
 
 Example of data structure with validation set **(database_all.xlsx)**:
@@ -117,6 +140,8 @@ Example of list of training subjects **(training_ids.csv)**:
 | ------------|
 | sub_0001    |
 | sub_0002    |
+
+With **several rows per subject**, the list of training subjects contains the subject IDs (repeated IDs are allowed, e.g. when using the training labels file, which has one row per subject and time point): all the rows of these subjects are used for training, all the rows of the other subjects for validation (```long_format = True``` in section 3 of script 02).
 
 For **hold-out validation with site harmonization**, the validation subjects must come from sites that are also in the training set. For **external validation in a new site**, also create a file with the IDs of the calibration subjects of the new site (e.g., **calibration_ids.csv**, same structure as training_ids.csv): they are used only to estimate the site effects of the new site and are excluded from the evaluation. They should be comparable to the training population (e.g., healthy controls in both).
 
@@ -272,6 +297,33 @@ Each site needs at least 2 subjects in each training set (in practice many more:
 
 Script **02_run_findbestclustcv** shows how to use site harmonization in cross-validation (section 1) and in hold-out or external validation (section 3).
 
+### viii. Several rows per subject (longitudinal data) <a name="Groups"></a>
+Some data have more than one row per subject, e.g. longitudinal data in **long format**, with one row per subject and time point (or age window). The files have the same structure as in [Input structure](#Input), with the subject ID repeated on each row of the subject and a column with the time point; subjects with missing time points simply have fewer rows. The clusters are then defined on the rows (e.g. states that a subject can occupy at different ages), and the sequence of labels of each subject can be analysed afterwards (e.g. transitions between states).
+
+The rows of the same subject are similar to each other. If the cross-validation splits them between the training and the validation fold, the classifier is evaluated on subjects it has already seen and the stability is **overestimated**: clusters may appear stable even when there are none. Give the subject ID of each row with ```groups```: all the rows of a subject are kept in the same fold, so that each validation fold contains only new subjects.
+
+```python
+groups = data['Subject_ID'].to_numpy()
+metrics, bestncl, tr_lab = findbestclust.best_nclust_confounds(data, modalities, covariates, iter_cv=10,
+                                                               groups=groups)
+best_model.fit(data, modalities, covariates, groups=groups)          # grid search
+```
+
+```groups``` can be combined with ```strat_vect``` and with site harmonization (```site```): the folds are then stratified as far as possible while keeping the subjects together. Repeated cross-validation (```iter_cv```) uses a different random split of the subjects at each repetition.
+
+**Effect of age.** To remove the average differences between time points, add the time point to the covariates of each modality as dummy variables, e.g. ```pd.get_dummies(cov['Window'], prefix='Window', drop_first=True, dtype=float)```: the confound correction, estimated on the training set of each fold, then removes them.
+
+**External validation**: select the training subjects by ID, so that all their rows are in the training set, and give ```groups``` to ```evaluate_confounds```: an error is raised if a subject has rows in both the training and the validation (or calibration) set.
+
+```python
+out = findbestclust.evaluate_confounds(data_all, modalities_val, covariates_val, tr_idx, val_idx, nclust=bestncl,
+                                       groups=data_all['Subject_ID'].to_numpy())
+```
+
+The internal measures do not use cross-validation and need no groups: they treat each row as an observation. The same holds for ComBat, which treats the rows of a subject as independent observations; methods that model repeated measures in harmonization (e.g. longitudinal ComBat, Beer et al., 2020) are not implemented.
+
+Scripts **01_grid_search** and **02_run_findbestclustcv** show how to use groups (```group_col``` and, in section 3 of script 02, ```long_format```).
+
 
 ## 4. Example <a name="Example"></a>
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
@@ -284,6 +336,8 @@ An example of how to perform *NeuReval* can be found in the folder **NeuReval/sc
 *NeuReval* was originally developed in Python 3.8.10 on Ubuntu 20.04; the current version requires Python 3.10 or later. In case of any issues in running *NeuReval* on other operating systems (i.e., Windows), you can send an email at the following address: fcolombo.italia@gmail.com
 
 ## 6. References <a name="References"></a>
+Beer, J. C., Tustison, N. J., Cook, P. A., Davatzikos, C., Sheline, Y. I., Shinohara, R. T., & Linn, K. A. (2020). Longitudinal ComBat: A method for harmonizing longitudinal multi-scanner imaging data. _NeuroImage_, 220, 117129.
+
 Fortin, J. P., Cullen, N., Sheline, Y. I., Taylor, W. D., Aselcioglu, I., Cook, P. A., ... & Shinohara, R. T. (2018). Harmonization of cortical thickness measurements across scanners and sites. _NeuroImage_, 167, 104-120.
 
 Johnson, W. E., Li, C., & Rabinovic, A. (2007). Adjusting batch effects in microarray expression data using empirical Bayes methods. _Biostatistics_, 8(1), 118-127.

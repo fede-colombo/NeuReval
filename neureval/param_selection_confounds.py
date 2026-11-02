@@ -73,7 +73,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
         self.n_jobs = _check_n_jobs(n_jobs)
         self.strat = strat
 
-    def fit(self, data_tr, mod_tr, cov_tr, nclass=None, site=None, harmonize_covariates=None):
+    def fit(self, data_tr, mod_tr, cov_tr, nclass=None, site=None, harmonize_covariates=None, groups=None):
         """
         Class method that performs grid search cross-validation on training data. It
         deals with the error due to wrong parameter combinations (e.g., ward linkage
@@ -98,6 +98,11 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
             (e.g. age, sex): one table for all modalities, or a dictionary with one table per
             modality. Default None.
         :type harmonize_covariates: DataFrame, dictionary or None
+        :param groups: group of each row, for data with several rows per subject (e.g.
+            longitudinal data in long format): give the subject ID of each row. All the rows
+            of a subject are kept in the same cross-validation fold. Default None (each row
+            is a subject).
+        :type groups: array-like
         """
         _check_harmonization_inputs(_n_subjects(mod_tr, cov_tr), mod_tr, site, harmonize_covariates)
         # Harmonization, confound correction and preprocessing do not depend on the clustering and
@@ -112,7 +117,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
                       for param_preproc in preproc_grid]
             folds_by_preproc = _prepare_folds_multi(revals, data_tr, mod_tr, cov_tr, self.cv,
                                                     self.iter_cv, self.strat, self.n_jobs,
-                                                    site, harmonize_covariates)
+                                                    site, harmonize_covariates, groups)
             new_grid = list(itertools.product(grid['c'], grid['s'], preproc_grid))
             new_params = [(ng[0], ng[1], ng[2], folds_by_preproc[preproc_grid.index(ng[2])])
                           for ng in new_grid if self._allowed_par(ng[0])]
@@ -121,7 +126,7 @@ class ParamSelectionConfounds(RelativeValidationConfounds):
             reval = RelativeValidationConfounds(self.clust_method, self.class_method, None, self.nrand,
                                                 self.harmonization)
             folds = _prepare_folds(reval, data_tr, mod_tr, cov_tr, self.cv, self.iter_cv, self.strat,
-                                   self.n_jobs, site, harmonize_covariates)
+                                   self.n_jobs, site, harmonize_covariates, groups)
             new_grid = list(itertools.product(grid['c'], grid['s']))
             new_params = [(ng[0], ng[1], None, folds) for ng in new_grid if self._allowed_par(ng[0])]
 

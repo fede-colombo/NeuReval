@@ -71,6 +71,18 @@ site = None
 harmonize_covariates = None
 # harmonize_covariates = cov[['Age', 'Sex']]   # or a dictionary with one table per modality
 
+# Several rows per subject (optional), e.g. longitudinal data in long format with one row per subject
+# and time window. Specify the column with the subject ID: all the rows of a subject are kept in the
+# same cross-validation fold, so that the validation folds contain only subjects not seen in training.
+# Leave group_col = None when each row is a different subject.
+# In long format, add the time window to the covariates of each modality as dummy variables, so that the
+# confound correction removes the average differences between ages, e.g.
+# window_dummies = pd.get_dummies(cov['Window'], prefix='Window', drop_first=True, dtype=float)
+# covariates = {'feature_01': pd.concat([cov[['Sex']], window_dummies], axis=1), ...}
+group_col = None
+# group_col = 'Subject_ID'
+groups = data[group_col].to_numpy() if group_col is not None else None
+
 # Define clustering, classifier, and preprocessing parameters to be optimized.
 # params should be a dictionary of the form {‘s’: {classifier parameter grid}, ‘c’: {clustering parameter grid}} 
 # including the lists of classifiers and clustering methods to fit to the data.
@@ -104,7 +116,8 @@ best_model = ParamSelectionConfounds(params,
                                       clust_range=list(range(2,6)),
                                       strat=None)
 
-best_model.fit(data, modalities, covariates, site=site, harmonize_covariates=harmonize_covariates)
+best_model.fit(data, modalities, covariates, site=site, harmonize_covariates=harmonize_covariates,
+               groups=groups)
 
 # Save model's parameters in the output directory. Change file name to match the model you performed
 best_results = best_model.best_param_
