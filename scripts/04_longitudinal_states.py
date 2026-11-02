@@ -14,6 +14,7 @@
 #   4. Sequences of states and transition matrices
 #   5. Regression model of the transitions (e.g. PRS and SES)
 #   6. Validation of the states in new subjects (hold-out set, optional)
+#   7. Clusters of sequences of states: subjects with similar courses over time (optional)
 # Run the sections in order. If a hold-out set is used, sections 2-5 use only the training subjects,
 # so that the hold-out subjects are not used to choose the number of states. To choose the clustering and classifier parameters, run the grid search of
 # 01_grid_search.py on the same features (section 1 below), with group_col = 'Subject_ID'.
@@ -26,7 +27,9 @@ from sklearn.mixture import GaussianMixture
 from sklearn.linear_model import LogisticRegression
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.longitudinal import (composition_features, select_rows, add_reference_state,
-                                   state_sequences, transition_matrices, transition_table)
+                                   state_sequences, transition_matrices, transition_table,
+                                   sequence_features, sequence_profiles)
+from sklearn.cluster import KMeans
 from neureval.metrics import cv_agreement_metrics, agreement_metrics
 from neureval.visualization import plot_metrics
 from neureval.utils import load_table
@@ -262,3 +265,59 @@ print(holdout_trans['all'].round(3))
 holdout_trans['all'].to_csv('Val_transitions_prob_all.csv')
 pd.DataFrame({id_col: groups_all[holdout], time_col: window_all[holdout], 'Assigned_state': holdout_states}) \
     .to_csv('Val_states_per_row.csv', index=False)
+
+
+### 7. CLUSTERS OF SEQUENCES OF STATES (OPTIONAL)
+
+# Subjects with similar sequences of states (e.g. "ear infections in the first years, then no infections")
+# are grouped with NeuReval. Each subject is one row (no groups). Run sections 0-4 first and, for the
+# validation in the hold-out set, section 6.
+# encoding='onehot': subjects are similar if they are in the same states at the same times (timing matters);
+# encoding='duration': proportion of time spent in each state and number of changes (timing ignored).
+# max_missing: subjects with more missing windows are excluded; missing windows of the others are filled
+# with the mean of the nearest observed windows of the same subject.
+seq_feat = sequence_features(sequences, encoding='onehot', max_missing=1)
+print(f"Subjects with sequences: {len(seq_feat)} (excluded for missing windows: {len(sequences) - len(seq_feat)})")
+
+# Covariates of each subject for the confound correction (e.g. sex), from the subject-level file
+seq_cov = subject_data.set_index(id_col).loc[seq_feat.index, ['Sex']].astype(float).reset_index(drop=True)
+X_seq = seq_feat.reset_index(drop=True)
+
+# Clustering and classifier algorithms: k-means works well with one-hot sequences
+c_seq = KMeans(n_init=10, random_state=42)
+s_seq = LogisticRegression(max_iter=1000)
+findbest_seq = FindBestClustCVConfounds(c_seq, s_seq, preprocessing=None, nfold=2, nrand=10, n_jobs=1,
+                                        nclust_range=list(range(2, 7)))
+metrics_seq, bestncl_seq, seq_lab = findbest_seq.best_nclust_confounds(X_seq, {'sequences': X_seq},
+                                                                       {'sequences': seq_cov}, iter_cv=10)
+print(f"Best number of clusters of sequences: {bestncl_seq}")
+stab_mean, (_, stab_ci) = metrics_seq['val'][bestncl_seq]
+print(f"Validation set normalized stability: {stab_mean:.3f} +/- {stab_ci:.3f}")
+plot_metrics(metrics_seq, color=('black', 'black'), save_fig='plot_sequence_clusters.png')
+
+# Description of the clusters: proportion of their subjects in each state in each window (typical course).
+# Clusters may reflect mainly the time spent in the most frequent state (e.g. state 0): check the profiles.
+seq_labels = pd.Series(seq_lab, index=seq_feat.index, name='Sequence_cluster')
+profiles = sequence_profiles(sequences, seq_labels)
+print("Profiles of the clusters of sequences (proportion of subjects in each state, by window):")
+print(profiles.round(3))
+profiles.to_csv('Sequence_clusters_profiles.csv')
+seq_labels.to_csv('Sequence_clusters_per_subject.csv', index_label=id_col)
+
+# Validation in the hold-out subjects (requires section 6): sequences of the states assigned to them
+if training_ids_file is not None:
+    holdout_seq = state_sequences(groups_all[holdout], window_all[holdout], holdout_states, time_order=time_order)
+    # same columns as in training (a state may not occur in the hold-out subjects)
+    seq_feat_ho = sequence_features(holdout_seq, encoding='onehot', max_missing=1) \
+        .reindex(columns=seq_feat.columns, fill_value=0.0)
+    X_all = pd.concat([seq_feat, seq_feat_ho]).reset_index(drop=True)
+    cov_all_seq = subject_data.set_index(id_col).loc[list(seq_feat.index) + list(seq_feat_ho.index), ['Sex']] \
+        .astype(float).reset_index(drop=True)
+    tr_seq = np.r_[np.ones(len(seq_feat), dtype=bool), np.zeros(len(seq_feat_ho), dtype=bool)]
+    out_seq = findbest_seq.evaluate_confounds(X_all, {'sequences': X_all}, {'sequences': cov_all_seq},
+                                              tr_seq, ~tr_seq, nclust=bestncl_seq, tr_lab=seq_lab)
+    print(f"Clusters of sequences, hold-out normalized stability: {out_seq.test_stability:.3f}")
+    seq_val_metrics, _ = agreement_metrics(out_seq.test_cllab, out_seq.test_classlab)
+    print(f"Balanced accuracy {seq_val_metrics['balanced_accuracy']:.3f}, kappa {seq_val_metrics['cohen_kappa']:.3f}")
+    pd.Series(out_seq.test_classlab, index=seq_feat_ho.index, name='Assigned_sequence_cluster') \
+        .to_csv('Val_sequence_clusters_per_subject.csv', index_label=id_col)

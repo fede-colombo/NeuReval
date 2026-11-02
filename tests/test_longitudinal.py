@@ -12,7 +12,9 @@ from sklearn.svm import SVC
 
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.longitudinal import (composition_features, select_rows, add_reference_state,
-                                   state_sequences, transition_matrices, transition_table)
+                                   state_sequences, transition_matrices, transition_table,
+                                   sequence_features, sequence_profiles, to_wide,
+                                   level_shape_features)
 
 
 # ---------------------------------------------------------------------------
@@ -222,3 +224,158 @@ def test_transition_table_input_checks():
     with pytest.raises(ValueError, match="reserved names"):
         transition_table(LONG['subject'], LONG['window'], LONG['state'],
                          subject_data=pd.DataFrame({'state_to': [1, 1, 1]}, index=['A', 'B', 'C']))
+
+
+# ---------------------------------------------------------------------------
+# Step 7: sequence_features and sequence_profiles
+# ---------------------------------------------------------------------------
+SEQ = state_sequences(LONG['subject'], LONG['window'], LONG['state'])   # B misses window 2
+
+
+def test_sequence_features_onehot():
+    feat = sequence_features(SEQ, max_missing=1)
+    assert list(feat.columns) == ['1_0', '1_1', '1_2', '2_0', '2_1', '2_2', '3_0', '3_1', '3_2']
+    assert feat.loc['A'].tolist() == [1, 0, 0, 0, 1, 0, 0, 1, 0]
+    # B: window 2 missing, between state 1 (window 1) and state 2 (window 3)
+    assert feat.loc['B', ['2_0', '2_1', '2_2']].tolist() == [0, 0.5, 0.5]
+    for w in ('1', '2', '3'):
+        np.testing.assert_allclose(feat[[c for c in feat.columns if c.startswith(w + '_')]].sum(axis=1), 1)
+    # subjects with too many missing windows are excluded
+    assert sequence_features(SEQ).index.tolist() == ['A', 'C']
+
+
+def test_sequence_features_missing_at_the_edges():
+    seq = state_sequences(['A', 'A', 'B', 'B', 'B'], [2, 3, 1, 2, 3], [1, 2, 0, 0, 0])
+    feat = sequence_features(seq, max_missing=1)
+    assert feat.loc['A', ['1_0', '1_1', '1_2']].tolist() == [0, 1, 0]      # nearest observed window
+
+
+def test_sequence_features_duration():
+    feat = sequence_features(SEQ, encoding='duration', max_missing=1)
+    assert list(feat.columns) == ['prop_0', 'prop_1', 'prop_2', 'changes']
+    np.testing.assert_allclose(feat.loc['A'], [1 / 3, 2 / 3, 0, 0.5])
+    np.testing.assert_allclose(feat.loc['B'], [0, 0.5, 0.5, 1.0])         # 1 -> 2 between observed windows
+    with pytest.raises(ValueError, match="encoding"):
+        sequence_features(SEQ, encoding='hamming')
+
+
+def test_sequence_profiles():
+    labels = pd.Series([0, 1, 0], index=['A', 'B', 'C'])
+    prof = sequence_profiles(SEQ, labels)
+    assert prof.loc[(0, 1)].tolist() == [0.5, 0.5, 0.0, 2]
+    assert prof.loc[(0, 2), 1] == 1.0
+    assert (1, 2) not in prof.index                                      # B not observed in window 2
+    assert prof.loc[(1, 3), 'n_subjects'] == 1
+    # labels as an array in the order of the sequences
+    pd.testing.assert_frame_equal(sequence_profiles(SEQ, labels.to_numpy()), prof)
+    with pytest.raises(ValueError, match="not in sequences"):
+        sequence_profiles(SEQ, pd.Series([0], index=['Z']))
+
+
+def test_clusters_of_sequences_end_to_end():
+    """
+    Three typical courses over 5 windows (each window follows the course with probability 0.75):
+    the clusters of the one-hot sequences found with NeuReval follow the courses.
+    """
+    rng = np.random.default_rng(1)
+    courses = {0: [2, 2, 0, 0, 0], 1: [1, 1, 1, 1, 1], 2: [0, 0, 0, 3, 3]}
+    course = rng.integers(0, 3, 300)
+    rows = [[i, w + 1, courses[course[i]][w] if rng.random() < 0.75 else rng.integers(0, 4)]
+            for i in range(300) for w in range(5) if rng.random() >= 0.1]
+    df = pd.DataFrame(rows, columns=['id', 'window', 'state'])
+    seq = state_sequences(df['id'], df['window'], df['state'])
+    feat = sequence_features(seq, max_missing=1)
+    X = feat.reset_index(drop=True)
+    cov = pd.DataFrame({'sex': rng.integers(0, 2, len(X)).astype(float)})
+    from sklearn.linear_model import LogisticRegression
+    fb = FindBestClustCVConfounds(KMeans(n_init=10, random_state=0), LogisticRegression(max_iter=1000), None,
+                                  nrand=10, nclust_range=[2, 3, 4, 5])
+    _, k, lab = fb.best_nclust_confounds(X, {'seq': X}, {'seq': cov}, iter_cv=2)
+    from sklearn.metrics import adjusted_rand_score
+    assert k == 3
+    assert adjusted_rand_score(course[feat.index.to_numpy()], lab) > 0.8
+    prof = sequence_profiles(seq, pd.Series(lab, index=feat.index))
+    assert set(prof.index.get_level_values('cluster')) == {0, 1, 2}
+
+
+# ---------------------------------------------------------------------------
+# Step 8: to_wide and level_shape_features
+# ---------------------------------------------------------------------------
+TRAJ = pd.DataFrame([[1, 2, 3, 4, 5],       # A: increasing
+                     [11, 12, 13, 14, 15],  # B: same shape as A, higher level
+                     [5, 4, 3, 2, 1],       # C: decreasing
+                     [1, 3, 5, 3, 1],       # D: peak in the middle
+                     [5, 3, 1, 3, 5]],      # E: dip in the middle
+                    index=list('ABCDE'), dtype=float)
+
+
+def test_to_wide():
+    wide = to_wide(LONG['subject'], LONG['window'], LONG['state'] * 10)
+    assert list(wide.columns) == [1, 2, 3] and wide.loc['A'].tolist() == [0, 10, 10]
+    assert np.isnan(wide.loc['B', 2]) and wide.loc['B', 3] == 20
+
+
+def test_level_and_shape_are_separated():
+    feat = level_shape_features(TRAJ)
+    assert list(feat.columns) == ['level', 'linear', 'quadratic']
+    np.testing.assert_allclose(feat['level'], TRAJ.mean(axis=1))
+    # same shape, different level
+    np.testing.assert_allclose(feat.loc['A', ['linear', 'quadratic']], feat.loc['B', ['linear', 'quadratic']], atol=1e-9)
+    assert feat.loc['A', 'linear'] > 0 and feat.loc['C', 'linear'] < 0
+    assert abs(feat.loc['A', 'quadratic']) < 1e-9
+    assert feat.loc['D', 'quadratic'] < 0 < feat.loc['E', 'quadratic']        # peak < 0, dip > 0
+    assert abs(feat.loc['D', 'linear']) < 1e-9
+
+
+def test_level_shape_degree_and_time_points():
+    feat = level_shape_features(TRAJ, degree=4)
+    assert list(feat.columns) == ['level', 'linear', 'quadratic', 'cubic', 'degree_4']
+    # with all degrees the decomposition keeps all the information: same distances between subjects
+    # (level rescaled from a mean to a sum of squares, as the other coefficients)
+    feat_scaled = feat.copy()
+    feat_scaled['level'] *= np.sqrt(TRAJ.shape[1])
+    d_feat = np.linalg.norm(feat_scaled.to_numpy()[:, None] - feat_scaled.to_numpy()[None], axis=2)
+    d_traj = np.linalg.norm(TRAJ.to_numpy()[:, None] - TRAJ.to_numpy()[None], axis=2)
+    np.testing.assert_allclose(d_feat, d_traj, atol=1e-9)
+    # unequally spaced windows: a linear trajectory in time has no quadratic component
+    t = np.array([0.5, 2, 4.5, 8, 11.5])
+    lin = pd.DataFrame([2 + 0.3 * t])
+    assert abs(level_shape_features(lin, time_points=t).loc[0, 'quadratic']) < 1e-9
+    assert abs(level_shape_features(lin).loc[0, 'quadratic']) > 0.01  # equally spaced: not linear
+    with pytest.raises(ValueError, match="degree must be"):
+        level_shape_features(TRAJ, degree=5)
+    with pytest.raises(ValueError, match="one value per window"):
+        level_shape_features(TRAJ, time_points=[1, 2, 3])
+
+
+def test_level_shape_missing_windows():
+    traj = TRAJ.copy()
+    traj.loc['A', 2] = np.nan                        # a perfect line: same result without a window
+    traj.loc['D', [1, 2, 3]] = np.nan                # 2 observed windows: too few for degree 2
+    feat = level_shape_features(traj)
+    np.testing.assert_allclose(feat.loc['A'], level_shape_features(TRAJ).loc['A'], atol=1e-9)
+    assert feat.loc['D'].isna().all() and feat.drop('D').notna().all().all()
+    assert level_shape_features(traj, degree=1, min_observed=2).loc['D'].notna().all()
+
+
+def test_shape_clusters_follow_timing_not_level():
+    """
+    Three shapes over time (early, middle, late peak) and a large subject-specific level:
+    clustering the shape finds the 3 shapes, independently of the level.
+    """
+    rng = np.random.default_rng(0)
+    shapes = np.array([[3, 2, 1, .5, .5], [.5, 1.5, 3, 1.5, .5], [.5, .5, 1, 2, 3]])
+    shape = rng.integers(0, 3, 300)
+    mult = np.exp(rng.normal(0, 0.7, 300))
+    traj = pd.DataFrame(np.log1p(rng.poisson(4 * shapes[shape] * mult[:, None])))
+    feat = level_shape_features(traj)
+    X = feat[['linear', 'quadratic']]
+    cov = pd.DataFrame({'sex': rng.integers(0, 2, 300).astype(float)})
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import adjusted_rand_score
+    fb = FindBestClustCVConfounds(KMeans(n_init=10, random_state=0), LogisticRegression(max_iter=1000), None,
+                                  nrand=10, nclust_range=[2, 3, 4, 5])
+    _, k, lab = fb.best_nclust_confounds(X, {'shape': X}, {'shape': cov}, iter_cv=2)
+    assert k == 3
+    assert adjusted_rand_score(shape, lab) > 0.8
+    assert abs(adjusted_rand_score(pd.qcut(feat['level'], 3, labels=False), lab)) < 0.1

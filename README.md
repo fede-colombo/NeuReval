@@ -13,6 +13,7 @@ A stability-based relative clustering validation method to determine the best nu
     6. [Agreement metrics](#Metrics)
     7. [Site harmonization with ComBat](#Harmonization)
     8. [Several rows per subject (longitudinal data)](#Groups)
+    9. [Longitudinal states and transitions](#States)
 4. [Example](#Example)
 5. [Notes](#Notes)
 6. [References](#References)
@@ -324,6 +325,61 @@ The internal measures do not use cross-validation and need no groups: they treat
 
 Scripts **01_grid_search** and **02_run_findbestclustcv** show how to use groups (```group_col``` and, in section 3 of script 02, ```long_format```).
 
+### ix. Longitudinal states and transitions <a name="States"></a>
+With longitudinal data in long format, *NeuReval* can define **states** (clusters of rows: a subject can be in different states at different time points) and the module ```neureval.longitudinal``` describes how subjects move between states. It was developed for counts of different types of events in time windows (e.g. infections of different types in age windows), but most functions work with any states.
+
+**States or trajectories?** Longitudinal data can be clustered in two ways, which answer different questions:
+
+| | Trajectories | States |
+| - | ------------ | ------ |
+| Data | one row per subject, the time points side by side (wide format) | one row per subject and time point (long format) |
+| A cluster is | a typical course over time (e.g. "high in early childhood, then typical") | a profile at one time point (e.g. "mostly ear infections") |
+| Labels per subject | one, for the whole follow-up | one for each time point, can change over time |
+| Time | within the cluster (shape of the trajectory) | between clusters (transitions between states) |
+| Question | which courses over time exist? | which profiles exist, and how do subjects move between them? |
+| *NeuReval* | usual analysis, without groups, on the shape of the trajectories (```level_shape_features```) | ```groups``` and the functions below |
+
+With trajectories, each subject belongs to one cluster ("children in the persistent-high trajectory"). With states, a subject is in a state at a given time ("children in the respiratory state at 3-6 years"): always report the time point, and report the prevalence of the states as a proportion of the rows of each time point. When clustering trajectories, the clusters may reflect only the overall level (e.g. low, medium, high at all time points), as the time points are usually positively correlated: cluster the shape of the trajectories, separated from their level with ```level_shape_features```, and check whether the cluster profiles are parallel. Sequences of states can also be clustered afterwards, to group subjects with similar courses.
+
+| Function | What it does |
+| -------- | ------------ |
+| ```composition_features``` | Describes each row by the composition of its counts (which types prevail, as isometric log-ratio coordinates) and, separately, by its total, so that the states are not defined only by the total number of events. Rows without counts get missing values. Each row is transformed on its own: no leakage in cross-validation |
+| ```select_rows``` | Selects the same rows from data, covariates, groups, etc. (e.g. the rows with counts, to be clustered) |
+| ```add_reference_state``` | Combines the states found by *NeuReval* with a state defined a priori for the other rows: 0 = reference (e.g. no counts), 1..k = states found by *NeuReval* |
+| ```state_sequences``` | Sequence of states of each subject: one row per subject, one column per time window |
+| ```transition_matrices``` | Transitions between consecutive time windows (number of subjects or probabilities; the diagonal is the persistence) |
+| ```transition_table``` | One row per transition, with subject-level variables (e.g. polygenic scores), for regression models of the transitions |
+| ```sequence_features``` | Features describing the sequence of states of each subject (one-hot states by time window, or time spent in each state), to cluster subjects with similar sequences with *NeuReval* (one row per subject, no groups) |
+| ```sequence_profiles``` | Typical course of each cluster of sequences: proportion of its subjects in each state in each time window |
+| ```to_wide``` | One row per subject and one column per time window, from data in long format |
+| ```level_shape_features``` | Decomposes the trajectory of each subject into its level (mean over time) and its shape (linear: increase or decrease; quadratic: peak or dip; ...) with orthonormal polynomial contrasts, to cluster trajectories by their shape. Missing time points are allowed; each subject is transformed on its own: no leakage |
+
+```python
+from neureval.longitudinal import (composition_features, select_rows, add_reference_state,
+                                   transition_matrices, transition_table)
+
+features = composition_features(counts[['Respiratory', 'Ear', 'Gastro']])
+informative = features.notna().all(axis=1).to_numpy()                # rows with at least one count
+feat, cov_inf, groups_inf = select_rows(informative, features, covariates, groups)
+metrics, k, labels = findbestclust.best_nclust_confounds(feat, {'counts': feat}, {'counts': cov_inf},
+                                                         iter_cv=10, groups=groups_inf)
+states = add_reference_state(labels, informative)                   # 0 = no counts, 1..k = states
+transitions = transition_matrices(groups, window, states)
+table = transition_table(groups, window, states, subject_data=prs.set_index('Subject_ID'))
+```
+
+Notes:
+- **Rows without follow-up** in a time window must be removed, not set to zero: zero means "followed up, no events". Transitions are counted only between consecutive windows in which the subject has a row.
+- **Rare types** of events (few counts) can form a state of their own, because a single event changes the composition of a row a lot: merge them (e.g. into "Other") or check that the states are similar without them.
+- **Effect of age**: with the time window as dummy covariates, the states describe each row relative to the subjects of the same age; without them, some states may occur only at some ages. Report the choice.
+- The **stability** is computed on the rows that are clustered; the reference state is defined by a rule.
+- **Regression of the transitions** (e.g. multinomial logistic regression with statsmodels, not installed with *NeuReval*): each subject contributes several transitions, so use standard errors clustered by subject.
+- **Hold-out validation**: pass the training labels (```tr_lab```) to ```evaluate_confounds```, so that the hold-out subjects get the same state numbers as the training subjects.
+- **Trajectories**: transform counts first (e.g. ```np.log1p```). Use ```degree=1``` if only increases and decreases are expected: a quadratic term without real signal adds noise. Give ```time_points``` if the time windows are not equally spaced. Check that the clusters are not explained by the level (e.g. agreement with groups of overall level).
+- **Clusters of sequences**: with ```encoding='onehot'``` subjects are similar if they are in the same states at the same times; with ```encoding='duration'``` only the time spent in each state matters. Subjects with more missing windows than ```max_missing``` are excluded; the missing windows of the others are filled from the nearest observed windows of the same subject. The clusters may reflect mainly the time spent in the most frequent state (e.g. no events): check the profiles.
+
+Script **04_longitudinal_states** shows the whole analysis, from the counts file to the regression of the transitions, the validation in new subjects and the clusters of sequences.
+
 
 ## 4. Example <a name="Example"></a>
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
@@ -331,12 +387,18 @@ An example of how to perform *NeuReval* can be found in the folder **NeuReval/sc
 - **01_grid_search**: code to perform grid-search cross-validation for clustering/classifier/preprocessing parameters tuning
 - **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms. This script also provides codes to compute different kind of internal measures and external validation in an hold-out dataset
 - **03_visualization**: code to create a plot for clusters' representation
+- **04_longitudinal_states**: states and transitions in longitudinal count data in long format (see [Longitudinal states and transitions](#States))
+- **05_longitudinal_trajectories**: clusters of the shape of longitudinal trajectories (see [Longitudinal states and transitions](#States))
 
 ## 5. Notes <a name="Notes"></a>
 *NeuReval* was originally developed in Python 3.8.10 on Ubuntu 20.04; the current version requires Python 3.10 or later. In case of any issues in running *NeuReval* on other operating systems (i.e., Windows), you can send an email at the following address: fcolombo.italia@gmail.com
 
 ## 6. References <a name="References"></a>
+Aitchison, J. (1986). _The Statistical Analysis of Compositional Data_. Chapman and Hall.
+
 Beer, J. C., Tustison, N. J., Cook, P. A., Davatzikos, C., Sheline, Y. I., Shinohara, R. T., & Linn, K. A. (2020). Longitudinal ComBat: A method for harmonizing longitudinal multi-scanner imaging data. _NeuroImage_, 220, 117129.
+
+Egozcue, J. J., Pawlowsky-Glahn, V., Mateu-Figueras, G., & Barceló-Vidal, C. (2003). Isometric logratio transformations for compositional data analysis. _Mathematical Geology_, 35(3), 279-300.
 
 Fortin, J. P., Cullen, N., Sheline, Y. I., Taylor, W. D., Aselcioglu, I., Cook, P. A., ... & Shinohara, R. T. (2018). Harmonization of cortical thickness measurements across scanners and sites. _NeuroImage_, 167, 104-120.
 

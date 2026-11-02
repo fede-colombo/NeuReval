@@ -14,6 +14,12 @@ define states with NeuReval and study how subjects move between states over time
    transitions between consecutive time windows.
 4. transition_table: one row per transition, with subject-level variables, for regression
    models of the transitions (e.g. multinomial logistic regression).
+5. sequence_features and sequence_profiles: features describing the sequence of states of
+   each subject, to cluster subjects with similar sequences, and description of the
+   clusters of sequences.
+6. to_wide and level_shape_features: one row per subject with the time windows side by side,
+   and decomposition of each trajectory into its level and its shape over time, to cluster
+   trajectories by their shape rather than by their overall level.
 """
 
 import numpy as np
@@ -306,3 +312,220 @@ def transition_table(groups, time, states, time_order=None, subject_data=None):
                              f"(e.g. {sorted(missing, key=str)[:5]}): its index must be the subject ID.")
         table = table.join(subject_data, on='subject')
     return table
+
+
+def sequence_features(sequences, encoding='onehot', max_missing=0):
+    """
+    Features describing the sequence of states of each subject (one row per subject), to
+    cluster subjects with similar sequences with NeuReval (one row per subject: no groups).
+
+    - 'onehot': for each time window and state, 1 if the subject is in that state in that
+      window, 0 otherwise (columns '<window>_<state>'). Subjects are similar if they are in
+      the same states at the same times: the order and timing of the states matter.
+    - 'duration': proportion of the observed windows spent in each state (columns
+      'prop_<state>') and proportion of changes of state between successive observed windows
+      ('changes'; 0 for subjects with one observed window). Order and timing are ignored.
+
+    Missing windows (<NA> in `sequences`): subjects with more than `max_missing` missing windows
+    are excluded (they are not in the returned index). For the others, with 'onehot', each
+    missing window is filled with the mean of the nearest observed windows before and after it
+    (e.g. 0.5 for two states if they differ), using only the subject's own sequence: no
+    information is shared between subjects, so there is no leakage in cross-validation.
+
+    The clusters may reflect mainly the time spent in the most frequent state (e.g. a reference
+    "no counts" state): check the profiles of the clusters with :func:`sequence_profiles`.
+
+    :param sequences: states of each subject, as returned by :func:`state_sequences`
+        (subjects as index, time windows as columns, in time order; <NA> = missing window).
+    :type sequences: DataFrame
+    :param encoding: 'onehot' or 'duration'.
+    :type encoding: str
+    :param max_missing: maximum number of missing windows of a subject, default 0.
+    :type max_missing: int
+    :return: features, one row per subject included (subjects as index).
+    :rtype: DataFrame
+    """
+    if encoding not in ('onehot', 'duration'):
+        raise ValueError(f"encoding must be 'onehot' or 'duration', got {encoding!r}.")
+    sequences = pd.DataFrame(sequences)
+    n_missing = sequences.isna().sum(axis=1)
+    if (n_missing >= sequences.shape[1]).any():
+        raise ValueError("Some subjects have no observed window.")
+    keep = n_missing <= max_missing
+    seq = sequences.loc[keep]
+    if len(seq) == 0:
+        raise ValueError(f"No subject has at most {max_missing} missing window(s).")
+    states = sorted(pd.unique(seq.stack().dropna()), key=lambda v: (str(type(v)), v))
+
+    if encoding == 'duration':
+        values = seq.to_numpy(dtype=object)
+        observed = ~pd.isna(values)
+        feats = {f'prop_{st}': [(row[obs] == st).mean() for row, obs in zip(values, observed)] for st in states}
+        changes = []
+        for row, obs in zip(values, observed):
+            seen = row[obs]
+            changes.append(np.mean(seen[1:] != seen[:-1]) if len(seen) > 1 else 0.0)
+        out = pd.DataFrame(feats, index=seq.index)
+        out['changes'] = changes
+        return out
+
+    windows = list(seq.columns)
+    blocks = []
+    for st in states:
+        onehot = (seq == st).astype(float).where(seq.notna())
+        blocks.append(onehot)
+    # Fill missing windows of each subject with the mean of the nearest observed windows
+    filled = []
+    for onehot in blocks:
+        prev = onehot.ffill(axis=1)
+        nxt = onehot.bfill(axis=1)
+        filled.append(pd.concat([prev, nxt]).groupby(level=0, sort=False).mean().loc[seq.index]
+                      .where(onehot.isna(), onehot))
+    out = pd.concat({st: f for st, f in zip(states, filled)}, axis=1)
+    out = out.swaplevel(axis=1)[[(w, st) for w in windows for st in states]]
+    out.columns = [f'{w}_{st}' for w, st in out.columns]
+    return out.astype(float)
+
+
+def sequence_profiles(sequences, labels):
+    """
+    Describe clusters of sequences: for each cluster, proportion of its subjects in each state
+    in each time window (the typical course of the cluster over time).
+
+    :param sequences: states of each subject, as returned by :func:`state_sequences`.
+    :type sequences: DataFrame
+    :param labels: cluster of each subject, with the subjects as index (e.g. a Series with the
+        index of the features passed to NeuReval), or an array in the order of `sequences`.
+    :type labels: Series or array-like
+    :return: one row per cluster and time window, one column per state (proportion of the
+        subjects of the cluster observed in that window), plus 'n_subjects' (observed subjects).
+    :rtype: DataFrame
+    """
+    sequences = pd.DataFrame(sequences)
+    if isinstance(labels, pd.Series):
+        missing = set(labels.index) - set(sequences.index)
+        if missing:
+            raise ValueError(f"{len(missing)} subject(s) of labels are not in sequences "
+                             f"(e.g. {sorted(missing, key=str)[:5]}).")
+        seq = sequences.loc[labels.index]
+        lab = labels.to_numpy()
+    else:
+        lab = np.asarray(labels)
+        if len(lab) != len(sequences):
+            raise ValueError(f"labels has {len(lab)} values but sequences has {len(sequences)} subjects.")
+        seq = sequences
+    long = seq.assign(cluster=lab).melt(id_vars='cluster', var_name='time', value_name='state').dropna()
+    order = {t: i for i, t in enumerate(sequences.columns)}
+    table = pd.crosstab([long['cluster'], long['time']], long['state'], normalize='index')
+    table['n_subjects'] = long.groupby(['cluster', 'time']).size()
+    table = table.reset_index()
+    table['_pos'] = table['time'].map(order)
+    table = table.sort_values(['cluster', '_pos']).drop(columns='_pos').set_index(['cluster', 'time'])
+    table.columns.name = None
+    return table
+
+
+def to_wide(groups, time, values, time_order=None):
+    """
+    One row per subject and one column per time window (wide format), from data in long format.
+
+    :param groups: subject of each row (e.g. subject ID).
+    :type groups: array-like, (n_rows,)
+    :param time: time window of each row (see :func:`state_sequences` for the order).
+    :type time: array-like, (n_rows,)
+    :param values: value of each row (e.g. number of infections of one type).
+    :type values: array-like, (n_rows,)
+    :param time_order: time windows from the first to the last, default None (sorted values).
+    :type time_order: list
+    :return: values, with subjects as index and time windows as columns (in time order);
+        NaN where a subject has no row for a time window.
+    :rtype: DataFrame
+    """
+    df = _check_long(groups, time, values, time_order)
+    wide = df.pivot(index='subject', columns='time', values='state')
+    wide = wide.reindex(columns=df['time'].cat.categories).astype(float)
+    wide.columns = list(wide.columns)
+    wide.index.name = None
+    return wide
+
+
+def _orthonormal_polynomials(time_points, degree):
+    """
+    Orthonormal polynomial basis on the given time points: column 0 is constant, column 1
+    increases with time, column 2 is U-shaped, ... (one column per degree, 0 to `degree`).
+    """
+    t = np.asarray(time_points, dtype=float)
+    t = (t - t.mean()) / (t.std() if t.std() > 0 else 1.0)
+    q, r = np.linalg.qr(np.vander(t, degree + 1, increasing=True))
+    q = q * np.sign(np.diag(r))          # same sign as 1, t, t^2, ...
+    return q
+
+
+def level_shape_features(trajectories, degree=2, time_points=None, min_observed=None):
+    """
+    Decompose the trajectory of each subject (one row per subject, one column per time window)
+    into its level and its shape over time, with orthonormal polynomial contrasts:
+
+    - 'level': mean of the trajectory over the time windows;
+    - 'linear': increase (positive) or decrease (negative) over time;
+    - 'quadratic': peak in the middle windows (negative) or dip (positive);
+    - 'cubic', 'degree_4', ...: higher degrees, if requested.
+
+    Level and shape are separated: adding a constant to a trajectory changes only its level.
+    Clustering the shape columns (without 'level') groups subjects by the timing of their
+    values (e.g. early-high, late-onset) rather than by their overall level, which usually
+    dominates when the time windows are positively correlated. Keep 'level' to describe the
+    clusters, or include it as a separate modality if it is of interest.
+
+    Each subject is transformed on its own: no information is shared between subjects, so the
+    features can be computed before the cross-validation without leakage. Missing windows
+    (NaN) are allowed: the polynomial is fitted to the observed windows of the subject; subjects
+    with fewer than `min_observed` observed windows get NaN (exclude them). For counts, transform
+    the values first (e.g. np.log1p), as their distribution is very skewed.
+
+    :param trajectories: values of each subject (rows) in each time window (columns, in time
+        order), e.g. returned by :func:`to_wide`.
+    :type trajectories: DataFrame, (n_subjects, n_windows)
+    :param degree: highest degree of the shape (1 = linear only, 2 = linear and quadratic, ...),
+        at most n_windows - 1. Default 2.
+    :type degree: int
+    :param time_points: time of each window (e.g. mid-point of each age window, in years), if
+        the windows are not equally spaced. Default None (equally spaced).
+    :type time_points: array-like, (n_windows,)
+    :param min_observed: minimum number of observed windows of a subject. Default degree + 2
+        (at least one more window than the parameters of the polynomial).
+    :type min_observed: int
+    :return: 'level', 'linear', 'quadratic', ... with the same index as `trajectories`.
+    :rtype: DataFrame
+    """
+    traj = pd.DataFrame(trajectories)
+    values = traj.to_numpy(dtype=float)
+    n_windows = values.shape[1]
+    if not 1 <= degree <= n_windows - 1:
+        raise ValueError(f"degree must be between 1 and the number of windows - 1 ({n_windows - 1}), got {degree}.")
+    if time_points is None:
+        time_points = np.arange(n_windows)
+    time_points = np.asarray(time_points, dtype=float)
+    if time_points.shape != (n_windows,):
+        raise ValueError(f"time_points must have one value per window ({n_windows}).")
+    if len(np.unique(time_points)) != n_windows:
+        raise ValueError("time_points must be all different.")
+    if min_observed is None:
+        min_observed = degree + 2
+    if min_observed < degree + 1:
+        raise ValueError(f"min_observed must be at least degree + 1 ({degree + 1}).")
+
+    basis = _orthonormal_polynomials(time_points, degree)
+    coef = np.full((len(values), degree + 1), np.nan)
+    observed = np.isfinite(values)
+    complete = observed.all(axis=1)
+    coef[complete] = values[complete] @ basis                 # projection, exact for complete rows
+    for i in np.flatnonzero(~complete & (observed.sum(axis=1) >= min_observed)):
+        obs = observed[i]
+        coef[i] = np.linalg.lstsq(basis[obs], values[i, obs], rcond=None)[0]
+
+    names = ['linear', 'quadratic', 'cubic'] + [f'degree_{d}' for d in range(4, degree + 1)]
+    out = pd.DataFrame(coef[:, 1:], index=traj.index, columns=names[:degree])
+    # level as the mean of the fitted trajectory (= mean of the values for complete rows)
+    out.insert(0, 'level', coef[:, 0] * basis[0, 0])
+    return out
