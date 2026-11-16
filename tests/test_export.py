@@ -1,5 +1,5 @@
 """
-Tests for saving and loading fitted models (neureval.export).
+Tests for saving and loading fitted models and the whole pipeline (neureval.export).
 
 Run from the repository root:  pytest tests/test_export.py -v
 """
@@ -10,11 +10,16 @@ import numpy as np
 import pandas as pd
 import pytest
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
+from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import SVC
 
-from neureval.export import (GLMCorrection, load_models, model_from_dict, model_to_dict,
-                             save_models)
+from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
+from neureval.export import (GLMCorrection, export_model, load_model, load_models, model_from_dict,
+                             model_to_dict, save_models)
 from neureval.harmonization import ComBat
 from neureval.relative_validation_confounds import RelativeValidationConfounds
 
@@ -154,3 +159,163 @@ def test_wrong_file(tmp_path):
     path.write_text(json.dumps({'format': 'neureval-model', 'format_version': 99, 'models': {}}))
     with pytest.raises(ValueError, match="newer version"):
         load_models(path)
+
+
+# ---------------------------------------------------------------------------
+# Whole pipeline: export_model (training centre) and load_model (external centre)
+# ---------------------------------------------------------------------------
+def clustered_data(sites, n_per_site, shift_size=3.0, seed=0):
+    """3 clusters independent of site, site shifts, an age effect; two modalities as DataFrames."""
+    rng = np.random.default_rng(seed)
+    site = np.repeat(sites, n_per_site)
+    n = len(site)
+    y = rng.choice(3, size=n, p=[0.4, 0.35, 0.25])
+    centers = np.zeros((3, 8))
+    for k in range(3):
+        centers[k, k] = 5
+    X = centers[y] + rng.normal(0, 1, (n, 8))
+    age = rng.normal(50, 10, n)
+    sex = rng.integers(0, 2, n).astype(float)
+    X += np.outer(age - 50, rng.normal(0.05, 0.02, 8))
+    for i, s in enumerate(sites):
+        X[site == s] += shift_size * (i % 3 - 1)
+    data = pd.DataFrame(X, columns=[f'f{i}' for i in range(8)])
+    cov = pd.DataFrame({'age': age, 'sex': sex})
+    modalities = {'mri': data.iloc[:, :5], 'dti': data.iloc[:, 5:]}
+    covariates = {'mri': cov, 'dti': cov[['age']]}
+    return data, modalities, covariates, site, cov, y
+
+
+def subset(modalities, covariates, idx):
+    return ({k: v.iloc[idx].reset_index(drop=True) for k, v in modalities.items()},
+            {k: v.iloc[idx].reset_index(drop=True) for k, v in covariates.items()})
+
+
+def assert_same_evaluation(out, ref, exported):
+    np.testing.assert_array_equal(exported.train_cllab, ref.train_cllab)
+    assert out.train_cllab is None                     # training labels are not shared
+    assert out.train_acc == ref.train_acc
+    np.testing.assert_array_equal(out.test_cllab, ref.test_cllab)
+    np.testing.assert_array_equal(out.test_classlab, ref.test_classlab)
+    assert out.test_acc == ref.test_acc
+    assert out.test_stability == ref.test_stability
+
+
+@pytest.mark.parametrize('classifier, preproc', [
+    (LogisticRegression(max_iter=1000), None),
+    (QuadraticDiscriminantAnalysis(reg_param=0.01), PCA(n_components=4)),
+    (LinearDiscriminantAnalysis(), None),
+])
+def test_export_same_as_evaluate_confounds(classifier, preproc, tmp_path):
+    data, modalities, covariates, _, _, _ = clustered_data(['A'], 300, seed=10)
+    idx = np.random.default_rng(11).permutation(300)
+    tr, val = idx[:200], idx[200:]
+    fb = FindBestClustCVConfounds(GaussianMixture(n_init=3, random_state=42), classifier,
+                                  preprocessing=preproc, nrand=10)
+    ref = fb.evaluate_confounds(data, modalities, covariates, tr, val, nclust=3)
+
+    m_tr, c_tr = subset(modalities, covariates, tr)
+    exported = export_model(tmp_path / 'model.json', fb, m_tr, c_tr, nclust=3)
+    m_val, c_val = subset(modalities, covariates, val)
+    model = load_model(tmp_path / 'model.json')
+    out = model.evaluate(m_val, c_val)
+    assert_same_evaluation(out, ref, exported)
+    np.testing.assert_array_equal(model.predict(m_val, c_val), ref.test_classlab)
+    assert model.info['nclust'] == 3 and model.info['n_subjects'] == 200
+
+
+def test_export_with_combat_and_calibration(tmp_path):
+    """External site D, calibrated on part of its subjects: same results as evaluate_confounds."""
+    data, modalities, covariates, site, cov, _ = clustered_data(['A', 'B', 'C', 'D'], 120, seed=12)
+    hcov = cov[['age']]
+    tr = np.flatnonzero(site != 'D')
+    d = np.flatnonzero(site == 'D')
+    cal, ext = d[:40], d[40:]
+    fb = FindBestClustCVConfounds(GaussianMixture(n_init=3, random_state=42),
+                                  QuadraticDiscriminantAnalysis(reg_param=0.01), preprocessing=None, nrand=10)
+    ref = fb.evaluate_confounds(data, modalities, covariates, tr, ext, nclust=3, site=site,
+                                harmonize_covariates=hcov, calibration_idx=cal)
+
+    m_tr, c_tr = subset(modalities, covariates, tr)
+    exported = export_model(tmp_path / 'model.json', fb, m_tr, c_tr, nclust=3, site=site[tr],
+                            harmonize_covariates=hcov.iloc[tr].reset_index(drop=True))
+    # External centre: only site D, calibration subjects first
+    local = np.concatenate([cal, ext])
+    m_d, c_d = subset(modalities, covariates, local)
+    h_d = hcov.iloc[local].reset_index(drop=True)
+    model = load_model(tmp_path / 'model.json')
+    with pytest.raises(ValueError, match="calibrat"):
+        model.evaluate(m_d, c_d, site=site[local], harmonize_covariates=h_d)      # new site, not calibrated
+    out = model.evaluate(m_d, c_d, site=site[local], harmonize_covariates=h_d,
+                         calibration_idx=np.arange(len(cal)))
+    assert_same_evaluation(out, ref, exported)
+    # The loaded model is not changed by the calibration: a second evaluation gives the same results
+    out2 = model.evaluate(m_d, c_d, site=site[local], harmonize_covariates=h_d,
+                          calibration_idx=np.arange(len(cal)))
+    assert out2.test_stability == out.test_stability
+    assert model.info['training_sites'] == ['A', 'B', 'C']
+
+
+def test_export_file_has_no_individual_data(tmp_path):
+    data, modalities, covariates, _, _, _ = clustered_data(['A'], 237, seed=13)
+    fb = FindBestClustCVConfounds(KMeans(n_init=10, random_state=0), LogisticRegression(max_iter=1000),
+                                  preprocessing=None, nrand=5)
+    export_model(tmp_path / 'model.json', fb, modalities, covariates, nclust=3, metadata={'cohort': 'test'})
+    content = json.loads((tmp_path / 'model.json').read_text())
+
+    def shapes(value):
+        if isinstance(value, dict) and 'shape' in value:
+            yield value['shape']
+        elif isinstance(value, list):
+            for v in value:
+                yield from shapes(v)
+
+    for model in content['models'].values():
+        for value in model['attributes'].values():
+            for shape in shapes(value):
+                assert 237 not in shape          # no array with one row per training subject
+    assert content['metadata']['user'] == {'cohort': 'test'}
+    assert sum(content['metadata']['pipeline']['cluster_sizes'].values()) == 237
+
+
+def test_export_refuses_methods_with_individual_data(tmp_path):
+    data, modalities, covariates, _, _, _ = clustered_data(['A'], 100, seed=14)
+    fb = FindBestClustCVConfounds(GaussianMixture(), SVC(), preprocessing=None, nrand=5)
+    with pytest.raises(TypeError, match="SVC cannot be exported as classifier"):
+        export_model(tmp_path / 'model.json', fb, modalities, covariates, nclust=3)
+    assert not (tmp_path / 'model.json').exists()
+    fb = FindBestClustCVConfounds(GaussianMixture(), LogisticRegression(),
+                                  preprocessing=KNeighborsClassifier(), nrand=5)
+    with pytest.raises(TypeError, match="preprocessing"):
+        export_model(tmp_path / 'model.json', fb, modalities, covariates, nclust=3)
+
+
+def test_external_data_checked(tmp_path):
+    data, modalities, covariates, site, _, _ = clustered_data(['A'], 150, seed=15)
+    fb = FindBestClustCVConfounds(GaussianMixture(n_init=2, random_state=0), LogisticRegression(),
+                                  preprocessing=None, nrand=5)
+    export_model(tmp_path / 'model.json', fb, modalities, covariates, nclust=3)
+    model = load_model(tmp_path / 'model.json')
+
+    swapped = dict(modalities, mri=modalities['mri'][['f1', 'f0', 'f2', 'f3', 'f4']])
+    with pytest.raises(ValueError, match="different order"):
+        model.evaluate(swapped, covariates)
+    renamed = dict(modalities, mri=modalities['mri'].rename(columns={'f4': 'other'}))
+    with pytest.raises(ValueError, match="missing \\['f4'\\]"):
+        model.evaluate(renamed, covariates)
+    with pytest.raises(ValueError, match="modalities"):
+        model.evaluate({'mri': modalities['mri']}, {'mri': covariates['mri']})
+    with pytest.raises(ValueError, match="without site harmonization"):
+        model.evaluate(modalities, covariates, site=site)
+    # Arrays instead of DataFrames: only the number of columns can be checked
+    arrays = {k: v.to_numpy() for k, v in modalities.items()}
+    assert model.evaluate(arrays, covariates) is not None
+    with pytest.raises(ValueError, match="columns"):
+        model.evaluate(dict(arrays, mri=arrays['mri'][:, :4]), covariates)
+
+
+def test_load_model_needs_a_pipeline(tmp_path):
+    X, site, _ = simulate(30, ['A', 'B'], seed=16)
+    save_models(tmp_path / 'combat.json', {'combat': ComBat().fit(X, site)})
+    with pytest.raises(ValueError, match="export_model"):
+        load_model(tmp_path / 'combat.json')

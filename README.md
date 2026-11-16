@@ -234,6 +234,30 @@ It returns (or None if no clusters are identified):
 
 The script 02_run_findbestclustcv shows how to define the training and validation sets from the subjects' IDs, so that the order of the rows in the input files does not matter.
 
+**External validation with the model only.** When the training data cannot be shared with the external centre (e.g. because of data protection rules), the training centre can send the fitted model instead of the data, with the ```neureval.export``` module:
+
+```python
+from neureval.export import export_model, load_model
+
+# Training centre: fit the final model on all its subjects and save it
+exported = export_model('model.json', findbestclust, modalities, covariates, nclust=bestncl,
+                        site=None, harmonize_covariates=None)
+
+# External centre: load the model and evaluate it on the local data
+model = load_model('model.json')
+out = model.evaluate(modalities_ext, covariates_ext, site=None, harmonize_covariates=None,
+                     calibration_idx=None)
+ ```
+The model is fitted as in ```evaluate_confounds``` (harmonization, confound correction, preprocessing, clustering, classifier, and classifiers trained on random labels for the normalized stability), and ```model.evaluate``` returns the same results as ```evaluate_confounds``` with both datasets in one place (same fields; ```train_cllab``` is None, as the training labels are not shared). ```model.predict``` assigns local subjects to the training clusters. For a new site, give a calibration sample (```calibration_idx```), as in [Site harmonization with ComBat](#Harmonization).
+
+The model is saved as plain JSON: the file can be opened with any text editor, loading it does not run any code, and it does not depend on the versions of the libraries. It contains only aggregated parameters (means, variances, coefficients), never individual data, so only some methods can be exported:
+- **classifiers**: LogisticRegression, LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis (SVM keeps support vectors, i.e. training subjects, inside the model)
+- **preprocessing**: None or PCA (UMAP keeps the training data inside the model)
+- **clustering**: GaussianMixture, KMeans, AgglomerativeClustering, HDBSCAN (only their settings are saved: the external centre runs the clustering on its own data)
+- **site harmonization**: ComBat
+
+Use DataFrames for modalities and covariates: their column names are saved, and the external centre must use the same columns in the same order. Section 4 of script 02_run_findbestclustcv shows both sides.
+
 
 ### vi. Agreement metrics <a name="Metrics"></a>
 
@@ -385,7 +409,7 @@ Script **04_longitudinal_states** shows the whole analysis, from the counts file
 An example of how to perform *NeuReval* can be found in the folder **NeuReval/scripts**. These codes show the application of *NeuReval* using Gaussian Mixture Model as clustering algorithm, Support Vector Machine as classifier, and UMAP as dimensionality reduction algorithm:
 
 - **01_grid_search**: code to perform grid-search cross-validation for clustering/classifier/preprocessing parameters tuning
-- **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms. This script also provides codes to compute different kind of internal measures and external validation in an hold-out dataset
+- **02_run_findbestclustcv**: code to perform *NeuReval* with the optimized clustering/classifier/preprocessing algorithms. This script also provides codes to compute different kind of internal measures and external validation in an hold-out dataset, also when only the fitted model can be shared with the external centre (section 4)
 - **03_visualization**: code to create a plot for clusters' representation
 - **04_longitudinal_states**: states and transitions in longitudinal count data in long format (see [Longitudinal states and transitions](#States))
 - **05_longitudinal_trajectories**: clusters of the shape of longitudinal trajectories (see [Longitudinal states and transitions](#States))

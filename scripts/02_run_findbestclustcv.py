@@ -403,3 +403,170 @@ labels_val = pd.DataFrame({id_col: data_all[id_col][val_idx].to_numpy(),
                            'Assigned_training_cluster': out.test_classlab})
 # Change the .csv file name according to your model
 labels_val.to_csv('Labels_val_model_name.csv', index=False)
+
+### 4. EXTERNAL VALIDATION WITH THE MODEL ONLY
+# Use this section when the training data cannot be shared with the external centre (e.g. data protection
+# rules). The training centre fits the final model and saves it to a file (4a), which is sent to the external
+# centre instead of the data. The external centre evaluates it on its own data (4b). The results are the same
+# as in section 3, where both datasets are in one place.
+# The file is plain text (JSON): it can be opened with any text editor, and loading it does not run any code.
+# It contains only aggregated parameters (means, variances, coefficients), never individual data. For this
+# reason only some methods can be exported:
+# - classifiers: LogisticRegression, LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
+#   (SVM keeps support vectors, i.e. training subjects, inside the model and cannot be exported);
+# - preprocessing: None or PCA (UMAP keeps the training data inside the model);
+# - clustering: GaussianMixture, KMeans, AgglomerativeClustering, HDBSCAN (only their settings are saved:
+#   the external centre runs the clustering again on its own data);
+# - site harmonization: ComBat.
+# If you plan an external validation of this kind, use one of these methods from the grid search (script 01) on.
+
+## 4a. TRAINING CENTRE: fit the final model and save it
+import os
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.mixture import GaussianMixture
+from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
+from neureval.utils import load_table
+from neureval.export import export_model
+
+main_path = 'path/to/working/directory'
+data_path = os.path.join(main_path, 'models')
+out_dir = os.path.join(data_path, 'results', 'feature_name', 'covariates')
+os.makedirs(out_dir, exist_ok=True)
+os.chdir(out_dir)
+id_col = 'Subject_ID'
+
+# Data and covariates of the training subjects only (all of them are used to fit the model)
+data = load_table(os.path.join(data_path, 'database.xlsx'))
+cov = load_table(os.path.join(data_path, 'covariates.xlsx'))
+
+# Modalities and covariates as in section 1. Keep them as DataFrames (e.g. data.iloc[...]): their column names
+# are saved in the model, and the external centre must use the same columns, in the same order.
+modalities = {'feature_01': data.iloc[:, 2:124],
+              'feature_02': data.iloc[:, 124:272],
+              'feature_03': data.iloc[:, 272:]}
+covariates = {'feature_01': cov.iloc[:, 2:],
+              'feature_02': cov.iloc[:, 2:-2],
+              'feature_03': cov.iloc[:, 2:-1]}
+
+# Site harmonization with ComBat (optional), as in section 1
+site = None
+# site = cov['Site'].to_numpy()
+harmonize_covariates = None
+# harmonize_covariates = cov[['Age', 'Sex']]
+
+# Clustering, classifier and preprocessing with the optimized parameters (exportable methods only, see above)
+s = LogisticRegression(max_iter=1000)
+c = GaussianMixture(covariance_type='full', n_init=10, random_state=42)
+preproc = None
+# preproc = PCA(n_components=10)   # from sklearn.decomposition import PCA
+findbestclust = FindBestClustCVConfounds(c, s, preprocessing=preproc, nrand=10)
+
+# Best number of clusters identified in section 1
+bestncl = 3
+
+# Fit the final model on all the training subjects and save it.
+# Parameters to be specified:
+# path: name of the file to write (in the output folder)
+# nclust: best number of clusters (bestncl)
+# tr_lab: clustering labels of the training subjects, for clustering methods without n_clusters (e.g. HDBSCAN);
+#         default None: the clustering is run on all the training subjects, as in section 3
+# site, harmonize_covariates: site harmonization with ComBat (see above), default None
+# metadata: other information to send with the model (e.g. a description), without individual data
+exported = export_model('model_model_name.json', findbestclust, modalities, covariates, nclust=bestncl,
+                        tr_lab=None, site=site, harmonize_covariates=harmonize_covariates,
+                        metadata={'description': 'describe the training sample and the model here'})
+print(f"Training ACC: {exported.train_acc:.3f}")
+
+# The cluster labels of the training subjects are not saved in the model file: keep them here for post-hoc analyses
+labels_exported = pd.DataFrame({id_col: data[id_col], 'Labels': exported.train_cllab})
+labels_exported.to_csv('Labels_model_name_exported.csv', index=False)
+# The file 'model_model_name.json' is in the output folder: send it to the external centre
+
+
+## 4b. EXTERNAL CENTRE: evaluate the model on the local data
+# This part can be run on its own, with the model file and the local data only.
+import os
+import pandas as pd
+from neureval.utils import load_table
+from neureval.export import load_model
+from neureval.metrics import agreement_metrics
+
+main_path = 'path/to/working/directory'
+data_path = os.path.join(main_path, 'models')
+out_dir = os.path.join(data_path, 'results', 'feature_name', 'covariates')
+os.makedirs(out_dir, exist_ok=True)
+os.chdir(out_dir)
+id_col = 'Subject_ID'
+# Several rows per subject (long format): set long_format = True, as in section 3
+long_format = False
+
+# Load the model received from the training centre: put the file in the folder 'models', with the local data
+model = load_model(os.path.join(data_path, 'model_model_name.json'))
+# Description of the model: modalities with their features and covariates, number of clusters,
+# size of the training clusters, training accuracy, training sites (with harmonization)
+print(model.info)
+print(model.user_metadata)
+
+# Local data and covariates (same structure as in the training centre)
+data_ext = load_table(os.path.join(data_path, 'database_external.xlsx'))
+cov_ext = load_table(os.path.join(data_path, 'covariates_external.xlsx'))
+if not data_ext[id_col].equals(cov_ext[id_col]):
+    raise Exception('Data and covariates files must contain the same subjects in the same order. Please check them')
+
+# Same modalities (same keys) and same columns as in the training centre, in the same order
+modalities_ext = {'feature_01': data_ext.iloc[:, 2:124],
+                  'feature_02': data_ext.iloc[:, 124:272],
+                  'feature_03': data_ext.iloc[:, 272:]}
+covariates_ext = {'feature_01': cov_ext.iloc[:, 2:],
+                  'feature_02': cov_ext.iloc[:, 2:-2],
+                  'feature_03': cov_ext.iloc[:, 2:-1]}
+
+# Site harmonization: required if the model includes it (model.info['harmonization']).
+# A site that was not in the training centre (model.info['training_sites']) needs a calibration sample
+# (e.g. healthy controls, comparable to the training population), used only to estimate the site effects
+# and excluded from the evaluation, as in section 3.
+site_col = None               # e.g. 'Site'
+harmonize_cols = None         # e.g. ['Age', 'Sex']: same covariates as in the training centre
+calibration_ids_file = None   # e.g. 'calibration_ids.csv', with a column named as id_col
+
+site = cov_ext[site_col].to_numpy() if site_col is not None else None
+harmonize_covariates = cov_ext[harmonize_cols] if harmonize_cols is not None else None
+calibration_idx = None
+evaluated = pd.Series(True, index=data_ext.index)
+if calibration_ids_file is not None:
+    calibration_ids = load_table(os.path.join(data_path, calibration_ids_file))[id_col]
+    calibration_idx = data_ext[id_col].isin(calibration_ids).to_numpy()
+    evaluated = ~pd.Series(calibration_idx, index=data_ext.index)
+    print(f"Calibration sample size: {calibration_idx.sum()}")
+groups = data_ext[id_col].to_numpy() if long_format else None
+print(f"Evaluated sample size: {evaluated.sum()}")
+
+# Evaluate the replication of the training clusters in the local subjects (not used for calibration).
+# It returns the same fields as evaluate_confounds in section 3, except train_cllab (None: the training
+# labels are not shared). To only assign local subjects to the training clusters, use model.predict(...)
+# with the same parameters.
+out = model.evaluate(modalities_ext, covariates_ext, site=site, harmonize_covariates=harmonize_covariates,
+                     calibration_idx=calibration_idx, groups=groups)
+if out is None:
+    raise Exception('No clusters were identified in the local data')
+
+print(f"Training ACC (from the training centre): {out.train_acc:.3f}")
+print(f"External ACC (raw, chance level depends on the number of clusters): {out.test_acc:.3f}")
+print(f"External normalized stability: {out.test_stability:.3f} "
+      f"(0 = perfect replication, close to 1 = no better than chance)")
+
+val_metrics, val_cm = agreement_metrics(out.test_cllab, out.test_classlab)
+val_metrics = {'normalized_stability': out.test_stability, **val_metrics}
+for name, value in val_metrics.items():
+    print(f"{name:>24} = {value:.3f}" if isinstance(value, float) else f"{name:>24} = {value}")
+print("Confusion matrix (rows = local clustering, columns = classifier predictions):")
+print(val_cm)
+
+# Change the .csv file names according to your model
+pd.DataFrame.from_dict(val_metrics, orient='index', columns=['value']).to_csv('Ext_metrics_summary_model_name.csv')
+val_cm.to_csv('Ext_confusion_matrix_model_name.csv')
+labels_ext = pd.DataFrame({id_col: data_ext[id_col][evaluated].to_numpy(),
+                           'Local_clustering_labels': out.test_cllab,
+                           'Assigned_training_cluster': out.test_classlab})
+labels_ext.to_csv('Labels_ext_model_name.csv', index=False)
