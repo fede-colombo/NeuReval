@@ -34,6 +34,12 @@ subjects, and clusters of the sequences of states. It then follows script
 05_longitudinal_trajectories.py: subjects clustered by the shape of their trajectories over
 time (early, middle or late peak), which differ much more in their overall level.
 
+At the end, it checks the building blocks of an external validation in which the training
+centre shares only the fitted model, not the data (neureval.export): ComBat and the confound
+correction are fitted on the training sites, saved to a JSON file and loaded again, the new
+site is calibrated on the loaded model, and the data of the external subjects must be prepared
+exactly as evaluate_confounds does when it has access to all the data.
+
 Run from the repository root:  python scripts/00_smoke_test.py
 """
 import os
@@ -50,6 +56,8 @@ from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.utils import load_table
 from neureval.metrics import agreement_metrics, cv_agreement_metrics
 from neureval.internal_baselines_confounds import select_best, select_best_bic_aic
+from neureval.harmonization import ComBat
+from neureval.export import GLMCorrection, save_models, load_models
 from neureval.longitudinal import (composition_features, select_rows, add_reference_state,
                                    state_sequences, transition_matrices, transition_table,
                                    sequence_features, sequence_profiles, to_wide, level_shape_features)
@@ -595,6 +603,49 @@ def main():
         'Trajectories: shape clusters follow the true shapes': traj_results['shape'][1] > 0.8,
         'Trajectories: shape clusters independent of the level': abs(traj_results['shape'][2]) < 0.1,
         'Trajectories: shape closer to the true shapes than the windows': traj_results['shape'][1] > traj_results['windows'][1],
+    })
+    # 9. External validation with the model only (neureval.export), on the multi-site data of section 5.
+    # The training centre (sites A, B, C) fits ComBat and the confound correction of each modality on its
+    # subjects and saves only the fitted parameters. The external centre (site D) loads them, calibrates its
+    # site on the calibration sample and prepares the data of the other subjects. The result must be
+    # identical to the data prepared by evaluate_confounds in section 5e, which has access to all the data.
+    print('\nExternal validation with the model only: save and load the fitted harmonization and correction')
+    tr_pos, cal_pos, ext_pos = np.flatnonzero(abc), np.flatnonzero(calibration_idx), np.flatnonzero(ext_idx)
+
+    # Training centre
+    fitted = {}
+    for mod, X_mod in ms_modalities.items():
+        X_mod = X_mod.to_numpy()
+        combat = ComBat().fit(X_mod[tr_pos], site[tr_pos], harmonize_covariates.iloc[tr_pos])
+        H_tr = combat.transform(X_mod[tr_pos], site[tr_pos], harmonize_covariates.iloc[tr_pos])
+        fitted[f'combat_{mod}'] = combat
+        fitted[f'glm_{mod}'] = GLMCorrection().fit(H_tr, ms_covariates[mod].iloc[tr_pos])
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = os.path.join(tmp, 'model.json')
+        save_models(model_path, fitted, metadata={'modalities': list(ms_modalities)})
+        with open(model_path, encoding='utf-8') as f:
+            file_text = f.read()
+        # External centre: only the file and its own data
+        loaded, meta = load_models(model_path)
+    X_ext = []
+    for mod in meta['modalities']:
+        X_mod = ms_modalities[mod].to_numpy()
+        combat = loaded[f'combat_{mod}']
+        combat.calibrate(X_mod[cal_pos], site[cal_pos], harmonize_covariates.iloc[cal_pos])
+        H_ext = combat.transform(X_mod[ext_pos], site[ext_pos], harmonize_covariates.iloc[ext_pos])
+        X_ext.append(loaded[f'glm_{mod}'].transform(H_ext, ms_covariates[mod].iloc[ext_pos]))
+    X_ext = np.concatenate(X_ext, axis=1)
+
+    # Reference: the same preparation done by the pipeline with all the data (private method used only here)
+    _, X_ext_ref = findbest_ms._prepare_fold(ms_modalities, ms_covariates, tr_pos, ext_pos, site=site,
+                                             harmonize_covariates=harmonize_covariates,
+                                             calibration_idx=cal_pos)
+    print(f'Model file: {len(file_text) / 1024:.0f} KB, {len(fitted)} models; external data prepared from the '
+          f'loaded models identical to evaluate_confounds: {np.array_equal(X_ext, X_ext_ref)}')
+
+    checks.update({
+        'Export: external data prepared exactly as evaluate_confounds': np.array_equal(X_ext, X_ext_ref),
+        'Export: no subject IDs in the model file': 'sub-' not in file_text,
     })
     failed = [name for name, ok in checks.items() if not ok]
     print('\nSMOKE TEST PASSED' if not failed else f'\nWARNING: unexpected {", ".join(failed)}')
