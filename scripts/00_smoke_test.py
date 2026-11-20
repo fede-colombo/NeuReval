@@ -34,6 +34,12 @@ subjects, and clusters of the sequences of states. It then follows script
 05_longitudinal_trajectories.py: subjects clustered by the shape of their trajectories over
 time (early, middle or late peak), which differ much more in their overall level.
 
+At the end, it checks the external validation in which the training centre shares only the
+fitted model, not the data (neureval.export): the training centre saves the model with
+export_model, the external centre loads it with load_model, calibrates its new site and
+evaluates the replication of the clusters. The results must be identical to those of
+evaluate_confounds with both datasets in one place.
+
 Run from the repository root:  python scripts/00_smoke_test.py
 """
 import os
@@ -50,6 +56,7 @@ from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.utils import load_table
 from neureval.metrics import agreement_metrics, cv_agreement_metrics
 from neureval.internal_baselines_confounds import select_best, select_best_bic_aic
+from neureval.export import export_model, load_model
 from neureval.longitudinal import (composition_features, select_rows, add_reference_state,
                                    state_sequences, transition_matrices, transition_table,
                                    sequence_features, sequence_profiles, to_wide, level_shape_features)
@@ -595,6 +602,55 @@ def main():
         'Trajectories: shape clusters follow the true shapes': traj_results['shape'][1] > 0.8,
         'Trajectories: shape clusters independent of the level': abs(traj_results['shape'][2]) < 0.1,
         'Trajectories: shape closer to the true shapes than the windows': traj_results['shape'][1] > traj_results['windows'][1],
+    })
+    # 9. External validation with the model only (neureval.export), on the multi-site data of section 5,
+    # as in section 4 of script 02. The training centre (sites A, B, C) fits the final model and saves it to a
+    # file; the external centre (site D) has only the file and its own data, calibrates its site on the
+    # calibration sample and evaluates the replication of the clusters. The results must be identical to
+    # evaluate_confounds with both datasets in one place (as in section 5e). SVM keeps training subjects in
+    # the model and cannot be exported: logistic regression is used here.
+    print('\nExternal validation with the model only: export_model in the training centre, load_model in the external one')
+    fb_export = FindBestClustCVConfounds(c_ms, LogisticRegression(max_iter=1000), preprocessing=None, nrand=10)
+    tr_pos, cal_pos, ext_pos = np.flatnonzero(abc), np.flatnonzero(calibration_idx), np.flatnonzero(ext_idx)
+    ref = fb_export.evaluate_confounds(ms_data, ms_modalities, ms_covariates, tr_pos, ext_pos, nclust=3, site=site,
+                                       harmonize_covariates=harmonize_covariates, calibration_idx=cal_pos)
+
+    def rows(table, idx):
+        return table.iloc[idx].reset_index(drop=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        model_path = os.path.join(tmp, 'model.json')
+        try:
+            export_model(model_path, findbest_ms, {k: rows(v, tr_pos) for k, v in ms_modalities.items()},
+                         {k: rows(v, tr_pos) for k, v in ms_covariates.items()}, nclust=3)
+            svm_refused = False
+        except TypeError:
+            svm_refused = True
+        # Training centre: only its own subjects
+        exported = export_model(model_path, fb_export, {k: rows(v, tr_pos) for k, v in ms_modalities.items()},
+                                {k: rows(v, tr_pos) for k, v in ms_covariates.items()}, nclust=3,
+                                site=site[tr_pos], harmonize_covariates=rows(harmonize_covariates, tr_pos))
+        with open(model_path, encoding='utf-8') as f:
+            file_text = f.read()
+        # External centre: only the file and its own subjects (calibration subjects first)
+        local = np.concatenate([cal_pos, ext_pos])
+        model = load_model(model_path)
+        out_model = model.evaluate({k: rows(v, local) for k, v in ms_modalities.items()},
+                                   {k: rows(v, local) for k, v in ms_covariates.items()}, site=site[local],
+                                   harmonize_covariates=rows(harmonize_covariates, local),
+                                   calibration_idx=np.arange(len(cal_pos)))
+    same = (out_model.test_stability == ref.test_stability and out_model.test_acc == ref.test_acc
+            and np.array_equal(out_model.test_classlab, ref.test_classlab)
+            and np.array_equal(exported.train_cllab, ref.train_cllab))
+    print(f'Model file: {len(file_text) / 1024:.0f} KB. External site D: normalized stability '
+          f'{out_model.test_stability:.3f}, ARI between assigned and true clusters '
+          f'{adjusted_rand_score(y_ms[ext_pos], out_model.test_classlab):.3f}; '
+          f'identical to evaluate_confounds: {same}; SVM refused: {svm_refused}')
+
+    checks.update({
+        'Export: same results as evaluate_confounds with all the data': same,
+        'Export: no subject IDs in the model file': 'sub-' not in file_text,
+        'Export: SVM (support vectors = training subjects) refused': svm_refused,
     })
     failed = [name for name, ok in checks.items() if not ok]
     print('\nSMOKE TEST PASSED' if not failed else f'\nWARNING: unexpected {", ".join(failed)}')
