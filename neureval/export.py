@@ -15,13 +15,16 @@ For this reason the models are saved as plain JSON, not with pickle:
 
 - the file can be opened and read by anyone (e.g. a data protection officer);
 - loading it does not run any code, so a file from another centre is safe to open;
-- it does not depend on the versions of scikit-learn or numpy used to save it;
 - numbers are written with full precision, so a loaded model gives exactly the same
-  results as the original one.
+  results as the original one;
+- a check after loading (results on synthetic points saved in the file) detects a version
+  of scikit-learn that rebuilds a model differently.
 
-Only models whose fitted parameters are aggregated can be saved. Models that keep
-individual training data inside (e.g. k-nearest neighbours, SVM with support vectors,
-UMAP) are refused.
+Only models whose fitted parameters are aggregated can be saved. There is no fixed list of
+classifiers or preprocessing methods: any scikit-learn estimator is checked automatically
+(see "Models that can be saved" below), and models that keep individual training data inside
+(e.g. SVM with its support vectors, k-nearest neighbours) or that cannot be rebuilt from their
+parameters (e.g. random forests) are refused.
 
 Main functions:
 
@@ -41,12 +44,7 @@ from importlib.metadata import PackageNotFoundError, version
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.cluster import HDBSCAN, AgglomerativeClustering, KMeans
-from sklearn.decomposition import PCA
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import zero_one_loss
-from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
 
 from neureval.best_nclust_cv_confounds import _check_groups, _check_groups_disjoint, _check_indices, _n_subjects
@@ -141,52 +139,39 @@ class GLMCorrection:
 
 
 # ----------------------------------------------------------------------
-# Models that can be saved, with the attributes that describe them
+# Models that can be saved
 # ----------------------------------------------------------------------
-# For each class: the fitted attributes to save (constructor parameters are always saved).
-# Everything else (and any class not listed here) is never written to the file.
-# - fitted models: only aggregated parameters (means, variances, coefficients);
-# - clustering methods: only their settings (e.g. number of clusters), as the external centre
-#   runs the clustering again on its own data.
-_SUPPORTED = {
+# NeuReval classes are saved with an explicit list of fitted attributes.
+_NEUREVAL = {
     'ComBat': {
-        'cls': ComBat, 'fitted': True,
+        'cls': ComBat,
         'attributes': ['sites_', 'grand_mean_', 'beta_covariates_', 'var_pooled_', 'gamma_star_',
                        'delta_star_', 'calibrated_sites_', 'n_features_in_', 'covariate_names_',
                        'n_covariates_'],
     },
     'GLMCorrection': {
-        'cls': GLMCorrection, 'fitted': True,
+        'cls': GLMCorrection,
         'attributes': ['x_mean_', 'x_scale_', 'cov_mean_', 'cov_scale_', 'beta_'],
     },
-    # Preprocessing
-    'PCA': {
-        'cls': PCA, 'fitted': True,
-        'attributes': ['components_', 'mean_', 'explained_variance_', 'explained_variance_ratio_',
-                       'n_components_', 'n_features_in_'],
-    },
-    # Classifiers
-    'LogisticRegression': {
-        'cls': LogisticRegression, 'fitted': True,
-        'attributes': ['classes_', 'coef_', 'intercept_', 'n_features_in_'],
-    },
-    'LinearDiscriminantAnalysis': {
-        'cls': LinearDiscriminantAnalysis, 'fitted': True,
-        'attributes': ['classes_', 'coef_', 'intercept_', 'means_', 'priors_', 'n_features_in_'],
-    },
-    'QuadraticDiscriminantAnalysis': {
-        'cls': QuadraticDiscriminantAnalysis, 'fitted': True,
-        'attributes': ['classes_', 'means_', 'priors_', 'rotations_', 'scalings_', 'n_features_in_'],
-    },
-    # Clustering methods (settings only)
-    'GaussianMixture': {'cls': GaussianMixture, 'fitted': False, 'attributes': []},
-    'KMeans': {'cls': KMeans, 'fitted': False, 'attributes': []},
-    'AgglomerativeClustering': {'cls': AgglomerativeClustering, 'fitted': False, 'attributes': []},
-    'HDBSCAN': {'cls': HDBSCAN, 'fitted': False, 'attributes': []},
 }
-_CLASSIFIERS = ['LogisticRegression', 'LinearDiscriminantAnalysis', 'QuadraticDiscriminantAnalysis']
-_PREPROCESSING = ['PCA']
-_CLUSTERING = ['GaussianMixture', 'KMeans', 'AgglomerativeClustering', 'HDBSCAN']
+# scikit-learn estimators are not listed one by one: any classifier, preprocessing (transformer) or
+# clustering method of scikit-learn can be saved if it passes these checks.
+# - When saving (model_to_dict): its settings and all its public fitted attributes (names ending
+#   with '_') must be plain values (numbers, strings, arrays): models that keep other objects inside
+#   (e.g. the trees of a random forest) are refused. The model is then rebuilt from what would be
+#   written and must give the same results as the original on synthetic points: models that need
+#   internal data that is not saved (e.g. k-nearest neighbours) are refused.
+# - When exporting a pipeline (export_model), also: no fitted array may have one value per training
+#   subject, and no row of a fitted array may be identical to the data of a training subject
+#   (e.g. the support vectors of an SVM).
+# - When loading: only scikit-learn classes can be rebuilt (never a class named in the file from
+#   another package), and the rebuilt model must give the same results on the synthetic points as
+#   when it was saved (the "fingerprint"), which detects a different version of scikit-learn
+#   rebuilding the model differently.
+# These checks catch the known ways in which a model keeps individual data, but they cannot prove
+# that a model contains none (e.g. a very large neural network can memorize its training data):
+# the responsibility for what is shared stays with the training centre.
+_FINGERPRINT_POINTS = 20
 
 
 def model_to_dict(model):
@@ -194,48 +179,63 @@ def model_to_dict(model):
     Describe a model as a dictionary of plain values (numbers, strings, lists), ready to be
     written as JSON.
 
-    :param model: model of one of the supported classes: fitted (ComBat, GLMCorrection, PCA,
-        LogisticRegression, LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis) or a
-        clustering method (GaussianMixture, KMeans, AgglomerativeClustering, HDBSCAN), of which
-        only the settings are saved.
+    :param model: a fitted ComBat or GLMCorrection, or a scikit-learn classifier, transformer
+        (e.g. PCA) or clustering method. Fitted scikit-learn models are saved with all their
+        fitted attributes; models that are not fitted (e.g. a clustering method) only with their
+        settings.
     :return: dictionary with the class name, constructor parameters and fitted attributes.
     :rtype: dict
     """
-    name = _check_supported(model)
-    spec = _SUPPORTED[name]
-    missing = [a for a in spec['attributes'] if not hasattr(model, a)]
-    if missing:
-        raise ValueError(f"{name} is not fitted yet (missing {missing}): call fit before saving it.")
-    params = model.get_params(deep=False) if hasattr(model, 'get_params') else {}
-    for key, value in params.items():
-        if not _is_plain(value):
-            raise TypeError(f"Parameter {key}={value!r} of {name} cannot be saved: only numbers, strings, "
-                            f"booleans, None, lists and dictionaries of these can be saved.")
-    return {
-        'class': name,
-        'params': params,
-        'attributes': {a: _encode(getattr(model, a)) for a in spec['attributes']},
-    }
+    name = type(model).__name__
+    if name in _NEUREVAL and isinstance(model, _NEUREVAL[name]['cls']):
+        attributes = _NEUREVAL[name]['attributes']
+        missing = [a for a in attributes if not hasattr(model, a)]
+        if missing:
+            raise ValueError(f"{name} is not fitted yet (missing {missing}): call fit before saving it.")
+        return {'class': name,
+                'params': _plain_params(model),
+                'attributes': {a: _encode(getattr(model, a), f"{name}.{a}") for a in attributes}}
+
+    module = _sklearn_module(model)
+    d = {'class': name, 'module': module, 'params': _plain_params(model),
+         'attributes': {a: _encode(v, f"{name}.{a}") for a, v in _fitted_attributes(model).items()}}
+    if d['attributes']:
+        d['fingerprint'] = _fingerprint(model)
+        # The model rebuilt from what would be saved must give the same results
+        try:
+            model_from_dict(json.loads(json.dumps(d, allow_nan=False)))
+        except Exception as err:
+            raise TypeError(f"{name} cannot be saved: it cannot be rebuilt from its saved parameters, as it "
+                            f"keeps internal objects that are not saved (e.g. the training data). "
+                            f"Details: {err}") from None
+    return d
 
 
-def model_from_dict(d):
+def model_from_dict(d, sklearn_version=None):
     """
     Rebuild a model from the dictionary written by `model_to_dict`.
 
     :param d: dictionary with the class name, constructor parameters and fitted attributes.
     :type d: dict
+    :param sklearn_version: version of scikit-learn used to save the model, for error messages.
+    :type sklearn_version: str
     :return: the model (fitted, or not fitted for clustering methods).
     """
     name = d.get('class')
-    if name not in _SUPPORTED:
-        raise ValueError(f"Unknown model class {name!r}. Known classes: {sorted(_SUPPORTED)}.")
-    spec = _SUPPORTED[name]
-    model = spec['cls'](**d['params'])
-    missing = [a for a in spec['attributes'] if a not in d['attributes']]
-    if missing:
-        raise ValueError(f"The saved {name} is incomplete: missing {missing}.")
-    for a in spec['attributes']:
+    if 'module' not in d:
+        if name not in _NEUREVAL:
+            raise ValueError(f"Unknown model class {name!r}.")
+        cls, attributes = _NEUREVAL[name]['cls'], _NEUREVAL[name]['attributes']
+        missing = [a for a in attributes if a not in d['attributes']]
+        if missing:
+            raise ValueError(f"The saved {name} is incomplete: missing {missing}.")
+    else:
+        cls, attributes = _sklearn_class(d['module'], name), list(d['attributes'])
+    model = cls(**d['params'])
+    for a in attributes:
         setattr(model, a, _decode(d['attributes'][a]))
+    if 'fingerprint' in d:
+        _check_fingerprint(model, d['fingerprint'], sklearn_version)
     return model
 
 
@@ -280,7 +280,7 @@ def load_models(path):
     if content.get('format_version', 0) > FORMAT_VERSION:
         raise ValueError(f"{path} was written by a newer version of NeuReval "
                          f"({content.get('neureval_version')}): update NeuReval to read it.")
-    models = {key: model_from_dict(d) for key, d in content['models'].items()}
+    models = {key: model_from_dict(d, content.get('sklearn_version')) for key, d in content['models'].items()}
     return models, content.get('metadata', {})
 
 
@@ -293,7 +293,7 @@ Eval = namedtuple('Eval', ['train_cllab', 'train_acc', 'test_cllab', 'test_acc',
 
 
 def export_model(path, findbestclust, modalities, covariates, nclust=None, tr_lab=None, site=None,
-                 harmonize_covariates=None, metadata=None):
+                 harmonize_covariates=None, metadata=None, min_cluster_size=10):
     """
     Training centre: fit the final model on all the subjects given and save it to a JSON file,
     which can be sent to an external centre instead of the data.
@@ -306,14 +306,22 @@ def export_model(path, findbestclust, modalities, covariates, nclust=None, tr_la
     datasets in one place.
 
     Only aggregated parameters are saved, never individual data (not even the cluster labels of
-    the training subjects). For this reason only some methods can be exported:
+    the training subjects). For this reason only some methods can be exported. Any scikit-learn
+    classifier, preprocessing method or clustering method is checked automatically:
 
-    - classifiers: LogisticRegression, LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
-      (SVM keeps support vectors, i.e. training subjects, and cannot be exported);
-    - preprocessing: None or PCA (UMAP keeps the training data);
-    - clustering: GaussianMixture, KMeans, AgglomerativeClustering, HDBSCAN (only the settings
-      are saved: the external centre runs the clustering on its own data);
+    - classifier and preprocessing: all their fitted parameters are saved. They are refused if
+      they keep other objects inside (e.g. the trees of a random forest), if a fitted array has
+      one value per training subject, if a row of a fitted array is identical to the data of a
+      training subject (e.g. the support vectors of an SVM), or if the model cannot be rebuilt
+      from its saved parameters (e.g. k-nearest neighbours, UMAP). Linear models, discriminant
+      analysis, naive Bayes and PCA pass these checks.
+    - clustering: only its settings are saved (e.g. the number of clusters): the external centre
+      runs the clustering on its own data.
     - harmonization: ComBat.
+
+    These checks catch the known ways in which a model keeps individual data, but they cannot
+    prove that a model contains none (e.g. a very large neural network can memorize its training
+    data): the training centre remains responsible for what it shares.
 
     :param path: path of the file to write (e.g. 'model.json').
     :type path: str
@@ -340,22 +348,24 @@ def export_model(path, findbestclust, modalities, covariates, nclust=None, tr_la
     :param metadata: other information to store (e.g. a description of the sample). Must contain
         only numbers, strings, booleans, lists and dictionaries, and no individual data.
     :type metadata: dict
+    :param min_cluster_size: smallest number of training subjects allowed in a cluster, default 10.
+        The parameters of a very small cluster (e.g. its mean) are close to the data of its
+        subjects. Set it to 0 to skip the check.
+    :type min_cluster_size: int
     :return: namedtuple with the cluster labels of the subjects (train_cllab, kept by the training
         centre and not saved) and the accuracy of the classifier on them (train_acc).
     :rtype: namedtuple
     """
     # Check that every method can be exported before fitting anything
     clust_method = clone(findbestclust.clust_method)
-    _check_supported(clust_method, _CLUSTERING, 'clustering method')
-    _check_supported(findbestclust.class_method, _CLASSIFIERS, 'classifier',
-                     hint=" SVM and random forests keep training subjects inside the model.")
+    _check_role(clust_method, 'clustering method')
+    _check_role(findbestclust.class_method, 'classifier')
     preproc = clone(findbestclust.preproc_method) if findbestclust.preproc_method is not None else None
     if preproc is not None:
-        _check_supported(preproc, _PREPROCESSING, 'preprocessing method',
-                         hint=" UMAP keeps the training data inside the model.")
+        _check_role(preproc, 'preprocessing method')
     harmonizer = _resolve_harmonizer(findbestclust.harmonization, site, harmonize_covariates)
-    if harmonizer is not None:
-        _check_supported(harmonizer, ['ComBat'], 'harmonization method')
+    if harmonizer is not None and not isinstance(harmonizer, ComBat):
+        raise TypeError(f"{type(harmonizer).__name__} cannot be exported as harmonization method: only ComBat.")
 
     n_subjects = _n_subjects(modalities, covariates)
     _check_harmonization_inputs(n_subjects, modalities, site, harmonize_covariates)
@@ -384,7 +394,9 @@ def export_model(path, findbestclust, modalities, covariates, nclust=None, tr_la
                      'covariates': _column_names(covariates[mod], len(glm.cov_mean_))}
     X_train = np.concatenate(prepared, axis=1)
     if preproc is not None:
-        X_train = preproc.fit(X_train).transform(X_train)
+        X_corrected = X_train
+        X_train = preproc.fit(X_corrected).transform(X_corrected)
+        _check_aggregated(preproc, X_corrected, 'preprocessing method')
         models['preprocessing'] = preproc
 
     # Clustering, classifier and classifiers trained on random labels (as in evaluate_confounds)
@@ -396,6 +408,13 @@ def export_model(path, findbestclust, modalities, covariates, nclust=None, tr_la
             raise ValueError(f"tr_lab has {len(labels)} labels but there are {n_subjects} subjects.")
     if not np.any(labels >= 0):
         raise ValueError(f"No clusters were identified with {clust_method}: nothing to export.")
+    sizes = pd.Series(labels[labels >= 0]).value_counts().sort_index()
+    small = sizes[sizes < (min_cluster_size or 0)]
+    if len(small) > 0:
+        raise ValueError(f"Cluster(s) {small.index.tolist()} have fewer than {min_cluster_size} training "
+                         f"subjects ({small.tolist()}): their parameters would be close to the data of "
+                         f"individual subjects. Use fewer clusters, or lower min_cluster_size if this is "
+                         f"acceptable.")
     classifier = clone(findbestclust.class_method).fit(X_train, labels)
     train_acc = 1 - zero_one_loss(labels, classifier.predict(X_train))
     np.random.seed(0)   # same random labels as in evaluate_confounds
@@ -403,6 +422,8 @@ def export_model(path, findbestclust, modalities, covariates, nclust=None, tr_la
     models['classifier'] = classifier
     for i, rnd in enumerate(random_labels):
         models[f'random_classifier/{i}'] = clone(findbestclust.class_method).fit(X_train, rnd)
+    for key in ['classifier'] + [f'random_classifier/{i}' for i in range(findbestclust.nrand)]:
+        _check_aggregated(models[key], X_train, 'classifier')
     models['clustering'] = clone(clust_method)
 
     values, counts = np.unique(labels, return_counts=True)
@@ -569,15 +590,130 @@ class ExportedModel:
 # ----------------------------------------------------------------------
 # Helper functions
 # ----------------------------------------------------------------------
-def _check_supported(model, allowed=None, role='model', hint=''):
-    """Name of the class of the model, if it can be saved (and has one of the allowed classes)."""
+def _sklearn_module(model):
+    """Module of a scikit-learn estimator (the only external classes that can be saved)."""
+    from sklearn.base import BaseEstimator
+    module = type(model).__module__
+    if not (isinstance(model, BaseEstimator) and module.split('.')[0] == 'sklearn'):
+        raise TypeError(f"{type(model).__name__} cannot be saved: only ComBat, GLMCorrection and "
+                        f"scikit-learn estimators can be saved.")
+    return module
+
+
+def _sklearn_class(module, name):
+    """
+    scikit-learn class named in a model file. Only scikit-learn classifiers, transformers and
+    clustering methods are accepted, so that a file cannot make NeuReval build another object.
+    """
+    import importlib
+    from sklearn.base import BaseEstimator, ClassifierMixin, ClusterMixin, TransformerMixin
+    from sklearn.mixture._base import BaseMixture
+    if not isinstance(module, str) or module.split('.')[0] != 'sklearn':
+        raise ValueError(f"Model class {name!r} from {module!r} refused: only scikit-learn classes can be "
+                         f"loaded.")
+    cls = getattr(importlib.import_module(module), str(name), None)
+    if not (isinstance(cls, type) and issubclass(cls, BaseEstimator)
+            and issubclass(cls, (ClassifierMixin, TransformerMixin, ClusterMixin, BaseMixture))):
+        raise ValueError(f"Model class {name!r} from {module!r} refused: only scikit-learn classifiers, "
+                         f"transformers and clustering methods can be loaded.")
+    return cls
+
+
+def _check_role(model, role):
+    """The method must be a scikit-learn estimator of the right kind, with settings that can be saved."""
+    from sklearn.base import is_classifier
     name = type(model).__name__
-    allowed = allowed if allowed is not None else list(_SUPPORTED)
-    if name not in allowed or not isinstance(model, _SUPPORTED[name]['cls']):
-        what = 'saved' if role == 'model' else f'exported as {role}'
-        raise TypeError(f"{name} cannot be {what}: only methods whose fitted parameters are aggregated over "
-                        f"subjects can be saved ({', '.join(allowed)}).{hint}")
-    return name
+    _sklearn_module(model)
+    needed = {'classifier': 'predict', 'preprocessing method': 'transform', 'clustering method': 'fit_predict'}
+    if not hasattr(model, needed[role]) or (role == 'classifier' and not is_classifier(model)):
+        raise TypeError(f"{name} cannot be exported as {role}: it has no {needed[role]} method.")
+    _plain_params(model)
+
+
+def _plain_params(model):
+    params = model.get_params(deep=False) if hasattr(model, 'get_params') else {}
+    for key, value in params.items():
+        if not _is_plain(value):
+            raise TypeError(f"Parameter {key}={value!r} of {type(model).__name__} cannot be saved: only "
+                            f"numbers, strings, booleans, None, lists and dictionaries of these can be saved.")
+    return params
+
+
+def _fitted_attributes(model):
+    """Public fitted attributes of a scikit-learn estimator (names ending with '_')."""
+    return {a: v for a, v in vars(model).items() if a.endswith('_') and not a.startswith('_')}
+
+
+def _arrays(value):
+    """All the arrays inside an attribute (an array, or a list of arrays)."""
+    if isinstance(value, np.ndarray):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _arrays(v)
+
+
+def _check_aggregated(model, X, role):
+    """
+    Refuse a fitted model with a fitted array that has one value per training subject, or a row
+    identical to the data of a training subject (e.g. the support vectors of an SVM).
+    """
+    name = type(model).__name__
+    X = np.ascontiguousarray(X, dtype=float)
+    n_subjects, n_features = X.shape
+    rows = {r.tobytes() for r in X}
+    for attr, value in _fitted_attributes(model).items():
+        for arr in _arrays(value):
+            if n_subjects in arr.shape:
+                raise TypeError(f"{name} cannot be exported as {role}: its fitted attribute {attr} has one "
+                                f"value per training subject (shape {arr.shape}).")
+            if arr.ndim == 2 and arr.shape[1] == n_features and arr.dtype.kind == 'f':
+                if any(np.ascontiguousarray(r, dtype=float).tobytes() in rows for r in arr):
+                    raise TypeError(f"{name} cannot be exported as {role}: its fitted attribute {attr} "
+                                    f"contains the data of training subjects (e.g. support vectors).")
+
+
+def _output_methods(model):
+    """Methods NeuReval uses after loading: predict for classifiers, transform for preprocessing."""
+    from sklearn.base import is_classifier
+    if is_classifier(model):
+        return ['predict']
+    return ['transform'] if hasattr(model, 'transform') else []
+
+
+def _fingerprint(model):
+    """
+    Results of the model on synthetic points (random numbers, no real data), for the methods that
+    NeuReval uses after loading (predict for classifiers, transform for preprocessing), to check
+    the model after loading it.
+    """
+    n_features = getattr(model, 'n_features_in_', None)
+    methods = _output_methods(model)
+    if n_features is None or not methods:
+        return None
+    points = np.random.default_rng(0).normal(size=(_FINGERPRINT_POINTS, int(n_features)))
+    outputs = {m: _encode(np.asarray(getattr(model, m)(points))) for m in methods}
+    return {'points': _encode(points), 'outputs': outputs}
+
+
+def _check_fingerprint(model, fingerprint, sklearn_version=None):
+    if fingerprint is None:
+        return
+    points = _decode(fingerprint['points'])
+    for method, saved in fingerprint['outputs'].items():
+        expected = _decode(saved)
+        try:
+            output = np.asarray(getattr(model, method)(points))
+            same = output.shape == expected.shape and (
+                np.allclose(output, expected, rtol=1e-6, atol=1e-8) if expected.dtype.kind == 'f'
+                else np.array_equal(output, expected))
+        except Exception:
+            same = False
+        if not same:
+            raise ValueError(f"The loaded {type(model).__name__} does not give the same results as when it was "
+                             f"saved ({method}; scikit-learn {sklearn_version or 'unknown'} when saved, "
+                             f"{_package_version('scikit-learn')} now). Install the scikit-learn version used "
+                             f"to save the model.")
 
 
 def _is_plain(value):
@@ -621,20 +757,32 @@ def _check_columns(table, expected, what):
         raise ValueError(f"{what} has {n} columns, but the model was fitted with {expected['n']}.")
 
 
-def _encode(value):
+def _encode(value, name='value'):
     """Arrays become {'dtype', 'shape', 'data'}; lists are encoded element by element."""
     if isinstance(value, np.ndarray):
         if value.dtype.kind in 'USO':
             return {'dtype': 'str', 'shape': list(value.shape), 'data': [str(v) for v in value.ravel()]}
         if value.dtype.kind not in 'biuf':
-            raise TypeError(f"Arrays of type {value.dtype} cannot be saved.")
+            raise TypeError(f"{name}: arrays of type {value.dtype} cannot be saved.")
+        if value.dtype.kind == 'f' and not np.all(np.isfinite(value)):
+            raise TypeError(f"{name} contains missing or infinite values and cannot be saved.")
         # Python floats are written with full precision by json (exact round trip)
         return {'dtype': value.dtype.str, 'shape': list(value.shape), 'data': value.ravel().tolist()}
     if isinstance(value, (list, tuple)):
-        return [_encode(v) for v in value]
+        return [_encode(v, name) for v in value]
     if isinstance(value, np.generic):
-        return value.item()
-    return value
+        value = value.item()
+    if isinstance(value, dict):
+        return {str(k): _encode(v, name) for k, v in value.items()}
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not np.isfinite(value):
+            raise TypeError(f"{name} is not finite ({value}) and cannot be saved.")
+        return value
+    raise TypeError(f"{name} is a {type(value).__name__} object and cannot be saved: only numbers, strings "
+                    f"and arrays can be saved (models that keep other objects inside, e.g. the trees of a "
+                    f"random forest, cannot be exported).")
 
 
 def _decode(value):

@@ -411,14 +411,17 @@ labels_val.to_csv('Labels_val_model_name.csv', index=False)
 # as in section 3, where both datasets are in one place.
 # The file is plain text (JSON): it can be opened with any text editor, and loading it does not run any code.
 # It contains only aggregated parameters (means, variances, coefficients), never individual data. For this
-# reason only some methods can be exported:
-# - classifiers: LogisticRegression, LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
-#   (SVM keeps support vectors, i.e. training subjects, inside the model and cannot be exported);
-# - preprocessing: None or PCA (UMAP keeps the training data inside the model);
-# - clustering: GaussianMixture, KMeans, AgglomerativeClustering, HDBSCAN (only their settings are saved:
-#   the external centre runs the clustering again on its own data);
+# reason not all methods can be exported. export_model checks the classifier and the preprocessing method
+# automatically, and refuses them (with an error explaining why) if they keep individual data or cannot be
+# rebuilt from their saved parameters:
+# - classifiers that pass: linear models (e.g. LogisticRegression, LinearSVC, SGDClassifier), discriminant
+#   analysis (LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis), GaussianNB, NearestCentroid.
+#   Refused: SVC (support vectors = training subjects), k-nearest neighbours, trees and random forests;
+# - preprocessing that passes: None, PCA, TruncatedSVD, FastICA. Refused: UMAP, KernelPCA;
+# - clustering: only its settings are saved (the external centre runs the clustering again on its own data);
 # - site harmonization: ComBat.
-# If you plan an external validation of this kind, use one of these methods from the grid search (script 01) on.
+# Clusters with fewer than 10 training subjects are refused (min_cluster_size).
+# If you plan an external validation of this kind, use an exportable classifier from the grid search (script 01) on.
 
 ## 4a. TRAINING CENTRE: fit the final model and save it
 import os
@@ -473,9 +476,11 @@ bestncl = 3
 #         default None: the clustering is run on all the training subjects, as in section 3
 # site, harmonize_covariates: site harmonization with ComBat (see above), default None
 # metadata: other information to send with the model (e.g. a description), without individual data
+# min_cluster_size: smallest number of training subjects allowed in a cluster, default 10
 exported = export_model('model_model_name.json', findbestclust, modalities, covariates, nclust=bestncl,
                         tr_lab=None, site=site, harmonize_covariates=harmonize_covariates,
-                        metadata={'description': 'describe the training sample and the model here'})
+                        metadata={'description': 'describe the training sample and the model here'},
+                        min_cluster_size=10)
 print(f"Training ACC: {exported.train_acc:.3f}")
 
 # The cluster labels of the training subjects are not saved in the model file: keep them here for post-hoc analyses

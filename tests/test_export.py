@@ -9,13 +9,15 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.cluster import KMeans
+from sklearn.cluster import HDBSCAN, KMeans
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
-from sklearn.linear_model import LogisticRegression
-from sklearn.mixture import GaussianMixture
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression, RidgeClassifier, SGDClassifier
+from sklearn.mixture import BayesianGaussianMixture, GaussianMixture
+from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
+from sklearn.svm import SVC, LinearSVC
 
 from neureval.best_nclust_cv_confounds import FindBestClustCVConfounds
 from neureval.export import (GLMCorrection, export_model, load_model, load_models, model_from_dict,
@@ -319,3 +321,73 @@ def test_load_model_needs_a_pipeline(tmp_path):
     save_models(tmp_path / 'combat.json', {'combat': ComBat().fit(X, site)})
     with pytest.raises(ValueError, match="export_model"):
         load_model(tmp_path / 'combat.json')
+
+# ---------------------------------------------------------------------------
+# General checks for scikit-learn estimators (no fixed list of classifiers)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize('classifier, clustering', [
+    (LinearSVC(), GaussianMixture(n_init=3, random_state=42)),
+    (GaussianNB(), GaussianMixture(n_init=3, random_state=42)),
+    (LogisticRegression(max_iter=1000), KMeans(n_init=10, random_state=0)),
+    (SGDClassifier(random_state=0), BayesianGaussianMixture(n_init=3, random_state=0)),
+])
+def test_other_classifiers_exported(classifier, clustering, tmp_path):
+    """Classifiers with aggregated parameters pass the checks and give the same results."""
+    data, modalities, covariates, _, _, _ = clustered_data(['A'], 300, seed=20)
+    idx = np.random.default_rng(21).permutation(300)
+    tr, val = idx[:200], idx[200:]
+    fb = FindBestClustCVConfounds(clustering, classifier, preprocessing=None, nrand=10)
+    ref = fb.evaluate_confounds(data, modalities, covariates, tr, val, nclust=3)
+    m_tr, c_tr = subset(modalities, covariates, tr)
+    exported = export_model(tmp_path / 'model.json', fb, m_tr, c_tr, nclust=3)
+    m_val, c_val = subset(modalities, covariates, val)
+    assert_same_evaluation(load_model(tmp_path / 'model.json').evaluate(m_val, c_val), ref, exported)
+
+
+@pytest.mark.parametrize('classifier, reason', [
+    (SVC(kernel='linear'), "data of training subjects"),       # support vectors
+    (SVC(kernel='rbf'), "data of training subjects"),
+    (KNeighborsClassifier(), "cannot be rebuilt"),             # training data in a private attribute
+    (RidgeClassifier(), "cannot be rebuilt"),                  # predict needs a private object
+    (RandomForestClassifier(n_estimators=5, random_state=0), "object and cannot be saved"),   # trees
+])
+def test_classifiers_with_individual_data_refused(classifier, reason, tmp_path):
+    data, modalities, covariates, _, _, _ = clustered_data(['A'], 150, seed=22)
+    fb = FindBestClustCVConfounds(GaussianMixture(n_init=2, random_state=0), classifier,
+                                  preprocessing=None, nrand=3)
+    with pytest.raises(TypeError, match=reason):
+        export_model(tmp_path / 'model.json', fb, modalities, covariates, nclust=3)
+    assert not (tmp_path / 'model.json').exists()
+
+
+def test_only_sklearn_classes_loaded(tmp_path):
+    """A model file cannot make NeuReval build an object that is not a scikit-learn estimator."""
+    X, site, _ = simulate(30, ['A', 'B'], seed=23)
+    d = model_to_dict(LogisticRegression().fit(X, site))
+    for module, name in (('os', 'system'), ('subprocess', 'Popen'), ('sklearn.utils', 'Bunch'),
+                         ('sklearn.model_selection', 'KFold')):
+        with pytest.raises(ValueError, match="refused"):
+            model_from_dict(dict(d, module=module, **{'class': name}))
+
+
+def test_fingerprint_detects_a_different_model(tmp_path):
+    """If the rebuilt model gives other results (e.g. another scikit-learn version), loading fails."""
+    X, site, _ = simulate(40, ['A', 'B'], seed=24)
+    d = model_to_dict(LogisticRegression().fit(X, site))
+    assert set(d['fingerprint']['outputs']) == {'predict'}
+    model_from_dict(json.loads(json.dumps(d)))                 # unchanged: loads
+    d['attributes']['coef_']['data'] = [-v for v in d['attributes']['coef_']['data']]   # as if rebuilt differently
+    with pytest.raises(ValueError, match="same results as when it was saved"):
+        model_from_dict(d)
+
+
+def test_min_cluster_size(tmp_path):
+    data, modalities, covariates, _, _, _ = clustered_data(['A'], 120, seed=25)
+    labels = np.zeros(120, dtype=int)
+    labels[:3] = 1                                             # a cluster of 3 subjects
+    labels[3:60] = 2
+    fb = FindBestClustCVConfounds(HDBSCAN(), LogisticRegression(), preprocessing=None, nrand=3)
+    with pytest.raises(ValueError, match="fewer than 10"):
+        export_model(tmp_path / 'model.json', fb, modalities, covariates, tr_lab=labels)
+    export_model(tmp_path / 'model.json', fb, modalities, covariates, tr_lab=labels, min_cluster_size=0)
+    assert load_model(tmp_path / 'model.json').info['cluster_sizes'] == {'0': 60, '1': 3, '2': 57}

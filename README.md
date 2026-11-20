@@ -250,11 +250,15 @@ out = model.evaluate(modalities_ext, covariates_ext, site=None, harmonize_covari
  ```
 The model is fitted as in ```evaluate_confounds``` (harmonization, confound correction, preprocessing, clustering, classifier, and classifiers trained on random labels for the normalized stability), and ```model.evaluate``` returns the same results as ```evaluate_confounds``` with both datasets in one place (same fields; ```train_cllab``` is None, as the training labels are not shared). ```model.predict``` assigns local subjects to the training clusters. For a new site, give a calibration sample (```calibration_idx```), as in [Site harmonization with ComBat](#Harmonization).
 
-The model is saved as plain JSON: the file can be opened with any text editor, loading it does not run any code, and it does not depend on the versions of the libraries. It contains only aggregated parameters (means, variances, coefficients), never individual data, so only some methods can be exported:
-- **classifiers**: LogisticRegression, LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis (SVM keeps support vectors, i.e. training subjects, inside the model)
-- **preprocessing**: None or PCA (UMAP keeps the training data inside the model)
-- **clustering**: GaussianMixture, KMeans, AgglomerativeClustering, HDBSCAN (only their settings are saved: the external centre runs the clustering on its own data)
-- **site harmonization**: ComBat
+The model is saved as plain JSON: the file can be opened with any text editor, and loading it does not run any code. It contains only aggregated parameters (means, variances, coefficients), never individual data. There is no fixed list of methods: any scikit-learn classifier and preprocessing method is checked automatically by ```export_model```, and refused if
+- it keeps objects that are not numbers or arrays (e.g. the trees of decision trees, random forests and gradient boosting)
+- a fitted array has one value per training subject (e.g. KernelPCA)
+- a fitted array contains the data of training subjects (e.g. the support vectors of SVC)
+- it cannot be rebuilt from its saved parameters (e.g. k-nearest neighbours, RidgeClassifier, MLPClassifier)
+
+Linear models (e.g. LogisticRegression, LinearSVC, SGDClassifier), discriminant analysis (LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis), GaussianNB and NearestCentroid pass these checks, as do PCA, TruncatedSVD, FastICA and StandardScaler. UMAP is not part of scikit-learn and keeps the training data: it cannot be exported. Only the settings of the **clustering** method are saved (the external centre runs the clustering on its own data), and **site harmonization** uses ComBat. Clusters with fewer than ```min_cluster_size``` training subjects (default 10) are refused, as their parameters would be close to the data of individual subjects.
+
+These checks catch the known ways in which a model keeps individual data, but they cannot prove that a model contains none: the training centre remains responsible for what it shares. When loading, only scikit-learn classes are rebuilt, and the results of the model on synthetic points saved in the file are checked, so that a different version of scikit-learn that rebuilds the model differently raises an error instead of giving wrong results.
 
 Use DataFrames for modalities and covariates: their column names are saved, and the external centre must use the same columns in the same order. Section 4 of script 02_run_findbestclustcv shows both sides.
 
